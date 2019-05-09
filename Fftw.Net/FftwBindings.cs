@@ -77,13 +77,13 @@ namespace Fftw.Net
             int_t sign, uint flags);
 
         [DllImport("libfftw3", EntryPoint = "fftw_plan_dft_2d")]
-        public static extern fftw_plan fftw_plan_dft_1d(
+        public static extern fftw_plan fftw_plan_dft_2d(
             int_t n0, int_t n1,
             double_ptr in_ptr, double_ptr out_ptr,
             int_t sign, uint flags);
 
         [DllImport("libfftw3", EntryPoint = "fftw_plan_dft_3d")]
-        public static extern fftw_plan fftw_plan_dft_1d(
+        public static extern fftw_plan fftw_plan_dft_3d(
             int_t n0, int_t n1, int_t n2,
             double_ptr in_ptr, double_ptr out_ptr,
             int_t sign, uint flags);
@@ -150,21 +150,21 @@ namespace Fftw.Net
             uint flags);
 
         [DllImport("libfftw3", EntryPoint = "fftw_plan_r2r_2d")]
-        public static extern fftw_plan fftw_plan_r2r_1d(
+        public static extern fftw_plan fftw_plan_r2r_2d(
             int_t n0, int_t n1,
             double_ptr in_ptr, double_ptr out_ptr,
             FftwR2rKind kind0, FftwR2rKind kind1,
             uint flags);
         
         [DllImport("libfftw3", EntryPoint = "fftw_plan_r2r_3d")]
-        public static extern fftw_plan fftw_plan_r2r_1d(
+        public static extern fftw_plan fftw_plan_r2r_3d(
             int_t n0, int_t n1, int_t n2,
             double_ptr in_ptr, double_ptr out_ptr,
             FftwR2rKind kind0, FftwR2rKind kind1, FftwR2rKind kind2,
             uint flags);
         
         [DllImport("libfftw3", EntryPoint = "fftw_plan_r2r")]
-        public static extern fftw_plan fftw_plan_r2r_1d(int rank, int_t[] n,
+        public static extern fftw_plan fftw_plan_r2r(int rank, int_t[] n,
             double_ptr in_ptr, double_ptr out_ptr,
             FftwR2rKind[] kind,
             uint flags);

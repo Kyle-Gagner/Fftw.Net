@@ -1,15 +1,48 @@
 using System;
+using System.Runtime.InteropServices;
+
 using static Fftw.Net.FftwBindings;
 
 namespace Fftw.Net
 {
-    public class FftwArray : IDisposable
+    public class FftwArray: IDisposable
     {
+        /// <summary>
+        /// Indicates whether this object owns memory at Pointer which has been allocated through FFTW
+        /// </summary>
+        private bool owning = false;
+
+        /// <summary>
+        /// This handle will have a value if Pointer refers to a pinned object
+        /// </summary>
+        private GCHandle? handle = null;
+        
+        /// <summary>
+        /// Set true on disposal to protect from accidentally trying to free resources multiple times
+        /// </summary>
         private bool disposed = false;
-        private IntPtr pointer;
-        private long length;
-        private long size;
-        private bool fftw_owns;
+
+        /// <summary>
+        /// An object used as a lock to ensure thread safety during object disposal
+        /// </summary>
+        private object lockObject = new object();
+
+        /// <summary>
+        /// A pointer to the contents of the array, either supplied externally, allocated on the unmanaged heap, or
+        /// from a pinned array
+        /// </summary>
+        public IntPtr Pointer { get; }
+
+        /// <summary>
+        /// The length of the array
+        /// </summary>
+        public int Length { get; }
+
+        /// <summary>
+        /// For the purpose of ensuring that plans which expect aligned data recieve it for new array executes, this
+        /// property may be used to determine whether the plan's arrays are expected to be aligned.
+        /// </summary>
+        internal bool FftwAllocated => owning;
 
         public Span<double> Span
         {
@@ -17,96 +50,54 @@ namespace Fftw.Net
             {
                 unsafe
                 {
-                    return new Span<double>(pointer.ToPointer(), (int)size);
+                    return new Span<double>(Pointer.ToPointer(), Length);
                 }
             }
         }
 
-        public long Length => length;
-
-        public FftwArray(long length)
+        public FftwArray(int length)
         {
-            this.length = length;
-            this.size = sizeof(double) * length;
-            unsafe
-            {
-                pointer = fftw_malloc((UIntPtr)size);
-            }
-            this.fftw_owns = true;
+            Length = length;
+            Pointer = fftw_malloc((UIntPtr)(sizeof(double) * Length));
+            owning = true;
         }
 
-        unsafe public FftwArray(double* pointer, long length)
+        public FftwArray(double[] array)
         {
-            this.length = length;
-            this.size = sizeof(double) * length;
-            this.pointer = new IntPtr(pointer);
-            this.fftw_owns = false;
+            Length = array.Length;
+            handle = GCHandle.Alloc(array, GCHandleType.Pinned);
+            Pointer = handle.Value.AddrOfPinnedObject();
         }
 
-        public FftwArray Slice(long start)
+        public unsafe FftwArray(IntPtr pointer, int length)
         {
-            if (start > length)
-                throw new ArgumentOutOfRangeException("start");
-            unsafe
-            {
-                return new FftwArray((double*)pointer + start, length - start);
-            }
+            Length = length;
+            Pointer = pointer;
         }
 
-        public FftwArray Slice(long start, long length)
+        protected virtual void Dispose(bool disposing)
         {
-            if (start > this.length)
-                throw new ArgumentOutOfRangeException("start");
-            if (length > this.length - start)
-                throw new ArgumentOutOfRangeException("length");
-            unsafe
+            lock (lockObject)
             {
-                return new FftwArray((double*)pointer + start, length - start);
+                if (disposed)
+                    return;
+                disposed = true;
             }
-        }
-
-        public static explicit operator IntPtr(FftwArray array) => array.pointer;
-
-        public unsafe static explicit operator double*(FftwArray array) => (double*)array.pointer.ToPointer();
-
-        private void Dispose(bool disposing)
-        {
-            unsafe
-            {
-                fftw_free(pointer);
-            }
+            if (owning)
+                fftw_free(Pointer);
+            else if (handle.HasValue)
+                handle.Value.Free();
         }
 
         public void Dispose()
         {
-            if (fftw_owns)
-            {
-                lock (this)
-                {
-                    if (!disposed)
-                    {
-                        disposed = true;
-                        Dispose(true);
-                        GC.SuppressFinalize(this);
-                    }
-                }
-            }
-            else
-            {
-                GC.SuppressFinalize(this);
-            }
+            Dispose(true);
+            GC.SuppressFinalize(this);
         }
 
         ~FftwArray()
         {
-            if (fftw_owns)
-            {
-                if (!disposed)
-                {
-                    disposed = true;
-                    Dispose(false);
-                }
-            }
+            Dispose(false);
         }
     }
 }
