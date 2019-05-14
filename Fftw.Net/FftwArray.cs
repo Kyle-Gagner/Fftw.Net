@@ -57,6 +57,8 @@ namespace Fftw.Net
 
         public FftwArray(int length)
         {
+            if (length < 1)
+                throw new ArgumentException("Arrays must contain at least one element.", nameof(length));
             Length = length;
             Pointer = fftw_malloc((UIntPtr)(sizeof(double) * Length));
             owning = true;
@@ -71,6 +73,8 @@ namespace Fftw.Net
 
         public unsafe FftwArray(IntPtr pointer, int length)
         {
+            if (length < 1)
+                throw new ArgumentException("Arrays must contain at least one element.", nameof(length));
             Length = length;
             Pointer = pointer;
         }
