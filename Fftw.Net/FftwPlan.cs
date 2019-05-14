@@ -46,7 +46,7 @@ namespace Fftw.Net
                 throw new ArgumentException($"Array length must be at least {length}.", argument);
         }
 
-        public static FftwPlan Dft1d(int n0, FftwArray inArray, FftwArray outArray,
+        public static FftwPlan Dft1D(int n0, FftwArray inArray, FftwArray outArray,
             FftwSign sign = FftwSign.FFTW_FORWARD, FftwFlags flags = FftwFlags.FFTW_MEASURE)
         {
             int length = 2 * n0;
@@ -59,19 +59,19 @@ namespace Fftw.Net
                     (int_t)sign, (uint_t)flags));
         }
 
-        public static FftwPlan Dft1d(int n0, out FftwArray inArray, out FftwArray outArray,
+        public static FftwPlan Dft1D(int n0, out FftwArray inArray, out FftwArray outArray,
             FftwSign sign = FftwSign.FFTW_FORWARD, FftwFlags flags = FftwFlags.FFTW_MEASURE)
         {
             inArray = new FftwArray(2 * n0);
             outArray = new FftwArray(2 * n0);
-            return Dft1d(n0, inArray, outArray, sign, flags);
+            return Dft1D(n0, inArray, outArray, sign, flags);
         }
 
-        public static FftwPlan Dft1d(int n0, out FftwArray ioArray,
+        public static FftwPlan Dft1D(int n0, out FftwArray ioArray,
             FftwSign sign = FftwSign.FFTW_FORWARD, FftwFlags flags = FftwFlags.FFTW_MEASURE)
         {
             ioArray = new FftwArray(2 * n0);
-            return Dft1d(n0, ioArray, ioArray, sign, flags);
+            return Dft1D(n0, ioArray, ioArray, sign, flags);
         }
 
         public void Execute()

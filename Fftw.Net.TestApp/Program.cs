@@ -8,7 +8,7 @@ namespace Fftw.Net.TestApp
         static void Main(string[] args)
         {
             Console.WriteLine("FFTW Test:");
-            var foo = FftwPlan.Dft1d(4, out FftwArray ioArray);
+            var foo = FftwPlan.Dft1D(4, out FftwArray ioArray);
             var bar = ioArray.Span;
             bar[0] =  1;
             bar[1] =  0;
