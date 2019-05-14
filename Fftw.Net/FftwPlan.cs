@@ -23,13 +23,8 @@ namespace Fftw.Net
         /// </summary>
         private object lockObject = new object();
 
-        public FftwArray In { get; }
-
-        public FftwArray Out { get; }
-
         private FftwPlan(IntPtr pointer)
         {
-            
             this.pointer = pointer;
         }
 
@@ -37,16 +32,6 @@ namespace Fftw.Net
             FftwFlags flags, IntPtr pointer) : this(pointer)
         {
             mustAlign = inArray.FftwAllocated && outArray.FftwAllocated && (flags & FftwFlags.FFTW_UNALIGNED) == 0;
-            In = inArray;
-            Out = outArray;
-        }
-
-        private FftwPlan(FftwArray ioArray, int ioLength,
-            FftwFlags flags, IntPtr pointer) : this(pointer)
-        {
-            mustAlign = ioArray.FftwAllocated && (flags & FftwFlags.FFTW_UNALIGNED) == 0;
-            In = ioArray;
-            Out = ioArray;
         }
 
         private static void ValidateSign(FftwSign sign)
@@ -57,13 +42,11 @@ namespace Fftw.Net
 
         private static void ValidateArray(ref FftwArray array, int length, string argument)
         {
-            if (array == null)
-                array = new FftwArray(length);
-            else if (array.Length < length)
+            if (array.Length < length)
                 throw new ArgumentException($"Array length must be at least {length}.", argument);
         }
 
-        public static FftwPlan Dft(int n0, FftwArray inArray, FftwArray outArray,
+        public static FftwPlan Dft1d(int n0, FftwArray inArray, FftwArray outArray,
             FftwSign sign = FftwSign.FFTW_FORWARD, FftwFlags flags = FftwFlags.FFTW_MEASURE)
         {
             int length = 2 * n0;
@@ -76,21 +59,20 @@ namespace Fftw.Net
                     (int_t)sign, (uint_t)flags));
         }
 
-        public static FftwPlan Dft(int n0, FftwArray ioArray,
+        public static FftwPlan Dft1d(int n0, out FftwArray inArray, out FftwArray outArray,
             FftwSign sign = FftwSign.FFTW_FORWARD, FftwFlags flags = FftwFlags.FFTW_MEASURE)
         {
-            int length = 2 * n0;
-            ValidateSign(sign);
-            ValidateArray(ref ioArray, length, nameof(ioArray));
-            return new FftwPlan(ioArray, length, flags,
-                fftw_plan_dft_1d(n0,
-                    ioArray.Pointer, ioArray.Pointer,
-                    (int_t)sign, (uint_t)flags));
+            inArray = new FftwArray(2 * n0);
+            outArray = new FftwArray(2 * n0);
+            return Dft1d(n0, inArray, outArray, sign, flags);
         }
-        
-        public static FftwPlan Dft(int n0,
-            FftwSign sign = FftwSign.FFTW_FORWARD, FftwFlags flags = FftwFlags.FFTW_MEASURE) =>
-            Dft(n0, null, null, sign, flags);
+
+        public static FftwPlan Dft1d(int n0, out FftwArray ioArray,
+            FftwSign sign = FftwSign.FFTW_FORWARD, FftwFlags flags = FftwFlags.FFTW_MEASURE)
+        {
+            ioArray = new FftwArray(2 * n0);
+            return Dft1d(n0, ioArray, ioArray, sign, flags);
+        }
 
         public void Execute()
         {

@@ -8,8 +8,8 @@ namespace Fftw.Net.TestApp
         static void Main(string[] args)
         {
             Console.WriteLine("FFTW Test:");
-            var foo = FftwPlan.Dft(4);
-            var bar = foo.In.Span;
+            var foo = FftwPlan.Dft1d(4, out FftwArray ioArray);
+            var bar = ioArray.Span;
             bar[0] =  1;
             bar[1] =  0;
             bar[2] =  0;
@@ -19,7 +19,7 @@ namespace Fftw.Net.TestApp
             bar[6] =  0;
             bar[7] =  1;
             foo.Execute();
-            PrintArry(foo.Out);
+            PrintArry(ioArray);
         }
         static void PrintArry(FftwArray arry)
         {
