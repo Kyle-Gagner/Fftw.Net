@@ -40,7 +40,7 @@ namespace Fftw.Net
                 throw new ArgumentException($"Sign is not one of FFTW_FORWARD, FFTW_BACKWARD", nameof(sign));
         }
 
-        private static void ValidateArray(ref FftwArray array, int length, string argument)
+        private static void ValidateArray(FftwArray array, int length, string argument)
         {
             if (array.Length < length)
                 throw new ArgumentException($"Array length must be at least {length}.", argument);
@@ -51,8 +51,8 @@ namespace Fftw.Net
         {
             int length = 2 * n0;
             ValidateSign(sign);
-            ValidateArray(ref inArray, length, nameof(inArray));
-            ValidateArray(ref outArray, length, nameof(outArray));
+            ValidateArray(inArray, length, nameof(inArray));
+            ValidateArray(outArray, length, nameof(outArray));
             return new FftwPlan(inArray, length, outArray, length, flags,
                 fftw_plan_dft_1d(n0,
                     inArray.Pointer, outArray.Pointer,
