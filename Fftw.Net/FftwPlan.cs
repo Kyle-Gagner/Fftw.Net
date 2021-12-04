@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Threading;
 
 using static Fftw.Net.FftwBindings;
 
@@ -7,9 +9,13 @@ using uint_t = System.UInt32;
 
 namespace Fftw.Net
 {
-    public class FftwPlan : IDisposable
+    /// <summary>
+    /// FftwPlan is a base class for encapsulations of FFTW plan objects and contains the static factory methods for
+    /// creating instances of plan objects.
+    /// </summary>
+    public abstract class FftwPlan : IDisposable
     {
-        private IntPtr pointer;
+        protected IntPtr Pointer { get; }
 
         private bool mustAlign;
 
@@ -19,35 +25,70 @@ namespace Fftw.Net
         private bool disposed = false;
 
         /// <summary>
-        /// An object used as a lock to ensure thread safety during object disposal
+        /// The list of FftwArray objects which were created by the planner factory method and require disposal
         /// </summary>
-        private object lockObject = new object();
+        private ICollection<FftwArray> owned = new List<FftwArray>();
 
-        private FftwPlan(FftwFlags flags, IntPtr pointer, params FftwArray[] arrays)
+        /// <summary>
+        /// Initializes an instance of <see cref="FftwPlan"/>.
+        /// </summary>
+        /// <param name="flags">The flags passed to the planner routine.</param>
+        /// <param name="pointer">The pointer to the plan returned by the planner routine</param>
+        /// <param name="arrays">The arrays used by the planner routine</param>
+        private protected FftwPlan(FftwFlags flags, IntPtr pointer, params FftwArray[] arrays)
         {
             if (pointer == IntPtr.Zero)
                 throw new ArgumentException("A NULL plan was returned by the FFTW planner method. " +
                     "This is probably due to a bad flag. Please check the FFTW documentation for details.");
-            this.pointer = pointer;
+            Pointer = pointer;
             mustAlign = (flags & FftwFlags.FFTW_UNALIGNED) == 0;
             foreach (var array in arrays)
                 mustAlign = mustAlign && array.FftwAllocated;
         }
 
+        /// <summary>
+        /// Assumes ownership for the given arrays, ensuring their disposal upon disposal of the plan.
+        /// </summary>
+        /// <param name="arrays">The arrays which are owned by the plan</param>
+        private protected void AssumeOwnership(params FftwArray[] arrays)
+        {
+            foreach (var array in arrays)
+            {
+                owned.Add(array);
+                array.IncrementPlans();
+            }
+        }
+
         #region Helper Functions
 
+        /// <summary>
+        /// Validates the sign argument.
+        /// </summary>
+        /// <param name="sign">The sign argument</param>
+        /// <exception cref="ArgumentException">Validation check failed</exception>
         private static void ValidateSign(FftwSign sign)
         {
             if (sign != FftwSign.FFTW_FORWARD && sign != FftwSign.FFTW_BACKWARD)
                 throw new ArgumentException($"Sign is not one of FFTW_FORWARD, FFTW_BACKWARD", nameof(sign));
         }
 
+        /// <summary>
+        /// Validates an array's length.
+        /// </summary>
+        /// <param name="array">The array to validate</param>
+        /// <param name="length">The minimum length requirement</param>
+        /// <param name="argument">The name of the array's argument in the factory method</param>
+        /// <exception cref="ArgumentException">Validation check failed</exception>
         private static void ValidateArray(FftwArray array, int length, string argument)
         {
             if (array.Length < length)
                 throw new ArgumentException($"Array length must be at least {length}.", argument);
         }
 
+        /// <summary>
+        /// Calculates the expected length of an array used in a complex to complex DFT plan.
+        /// <summary/>
+        /// <param name="n">The transform size in each dimension</param>
         private static int DftLength(params int[] n)
         {
             int length = 2;
@@ -56,6 +97,10 @@ namespace Fftw.Net
             return length;
         }
 
+        /// <summary>
+        /// Calculates the expected length of the real array used in a real to complex DFT plan.
+        /// <summary/>
+        /// <param name="n">The transform size in each dimension</param>
         private static int DftRealLength(params int[] n)
         {
             int length = 1;
@@ -64,6 +109,10 @@ namespace Fftw.Net
             return length;
         }
 
+        /// <summary>
+        /// Calculates the expected length of the complex array used in a real to complex DFT plan.
+        /// <summary/>
+        /// <param name="n">The transform size in each dimension</param>
         private static int DftComplexLength(params int[] n)
         {
             int length = 2;
@@ -73,6 +122,11 @@ namespace Fftw.Net
             return length;
         }
 
+        /// <summary>
+        /// Calculates the expected length of an array used in a real to real transform plan.
+        /// <summary/>
+        /// <param name="n">The transform size</param>
+        /// <param name="kind">The transform kind</param>
         private static int R2rLength(int n, FftwR2rKind kind)
         {
             switch (kind)
@@ -99,12 +153,33 @@ namespace Fftw.Net
             }
         }
 
+        /// <summary>
+        /// Calculates the expected length of an array used in a real to real transform plan.
+        /// <summary/>
+        /// <param name="n0">The transform size in dimension 0</param>
+        /// <param name="n1">The transform size in dimension 1</param>
+        /// <param name="kind0">The transform kind in dimension 0</param>
+        /// <param name="kind1">The transform kind in dimension 1</param>
         private static int R2rLength(int n0, int n1, FftwR2rKind kind0, FftwR2rKind kind1) =>
             R2rLength(n0, kind0) * R2rLength(n1, kind1);
 
+        /// <summary>
+        /// Calculates the expected length of an array used in a real to real transform plan.
+        /// <summary/>
+        /// <param name="n0">The transform size in dimension 0</param>
+        /// <param name="n1">The transform size in dimension 1</param>
+        /// <param name="n2">The transform size in dimension 2</param>
+        /// <param name="kind0">The transform kind in dimension 0</param>
+        /// <param name="kind1">The transform kind in dimension 1</param>
+        /// <param name="kind2">The transform kind in dimension 2</param>
         private static int R2rLength(int n0, int n1, int n2, FftwR2rKind kind0, FftwR2rKind kind1, FftwR2rKind kind2) =>
             R2rLength(n0, kind0) * R2rLength(n1, kind1) * R2rLength(n2, kind2);
 
+        /// <summary>
+        /// Calculates the expected length of an array used in a real to real transform plan.
+        /// </summary>
+        /// <param name="n">The transform size in each dimension</param>
+        /// <param name="kind">The transform kind in each dimension</param>
         private static int R2rLength(int[] n, FftwR2rKind[] kind)
         {
             if (n.Length != kind.Length)
@@ -115,6 +190,9 @@ namespace Fftw.Net
             return length;
         }
 
+        /// <summary>
+        /// Determines whether a transform is to be in-place by comparing array pointers for equality.
+        /// </summary>
         private static bool IsInPlace(FftwArray inArray, FftwArray outArray) =>
             inArray.Pointer == outArray.Pointer;
 
@@ -124,21 +202,46 @@ namespace Fftw.Net
 
         #region DFT
 
-        public static FftwPlan Dft1D(int n0, FftwArray inArray, FftwArray outArray,
+        /// <summary>
+        /// Creates a 1D DFT plan via the basic interface. See FFTW documentation for details on fftw_plan_dft_1d.
+        /// </summary>
+        /// <remarks>
+        /// This overload accepts user-supplied arrays which are owned by the user and must be disposed by the user
+        /// after the user disposes the plan. Use this overload in less common use cases where the arrays must be user
+        /// supplied or their lifetimes user controlled.
+        /// </remarks>
+        /// <param name="n0">The size of the transform in the 0th dimension</param>
+        /// <param name="inArray">The complex data input array</param>
+        /// <param name="outArray">The complex data output array</param>
+        /// <param name="sign">The direction of the transform</param>
+        /// <param name="flags">One or more planner flags, combined by bitwise OR</param>
+        public static FftwPlanDft Dft1D(int n0, FftwArray inArray, FftwArray outArray,
             FftwSign sign = FftwSign.FFTW_FORWARD, FftwFlags flags = FftwFlags.FFTW_MEASURE)
         {
             int length = DftLength(n0);
             ValidateSign(sign);
             ValidateArray(inArray, length, nameof(inArray));
             ValidateArray(outArray, length, nameof(outArray));
-            return new FftwPlan(flags,
+            return new FftwPlanDft(flags,
                 fftw_plan_dft_1d(n0,
                     inArray.Pointer, outArray.Pointer,
                     (int_t)sign, (uint_t)flags),
                 inArray, outArray);
         }
 
-        public static FftwPlan Dft1D(int n0, out FftwArray inArray, out FftwArray outArray,
+        /// <summary>
+        /// Creates a 1D DFT plan via the basic interface. See FFTW documentation for details on fftw_plan_dft_1d.
+        /// </summary>
+        /// <remarks>
+        /// This overload creates arrays which are owned by the plan and are disposed by the plan when the user
+        /// disposes the plan. Use this overload for common out of place transform use cases.
+        /// </remarks>
+        /// <param name="n0">The size of the transform in the 0th dimension</param>
+        /// <param name="inArray">The complex data input array</param>
+        /// <param name="outArray">The complex data output array</param>
+        /// <param name="sign">The direction of the transform</param>
+        /// <param name="flags">One or more planner flags, combined by bitwise OR</param>
+        public static FftwPlanDft Dft1D(int n0, out FftwArray inArray, out FftwArray outArray,
             FftwSign sign = FftwSign.FFTW_FORWARD, FftwFlags flags = FftwFlags.FFTW_MEASURE)
         {
             int length = DftLength(n0);
@@ -147,28 +250,66 @@ namespace Fftw.Net
             return Dft1D(n0, inArray, outArray, sign, flags);
         }
 
-        public static FftwPlan Dft1D(int n0, out FftwArray ioArray,
+        /// <summary>
+        /// Creates a 1D DFT plan via the basic interface. See FFTW documentation for details on fftw_plan_dft_1d.
+        /// </summary>
+        /// <remarks>
+        /// This overload creates an array which is owned by the plan and is disposed by the plan when the user
+        /// disposes the plan. Use this overload for common in place transform use cases.
+        /// </remarks>
+        /// <param name="n0">The size of the transform in the 0th dimension</param>
+        /// <param name="ioArray">The complex data input / output array</param>
+        /// <param name="sign">The direction of the transform</param>
+        /// <param name="flags">One or more planner flags, combined by bitwise OR</param>
+        public static FftwPlanDft Dft1D(int n0, out FftwArray ioArray,
             FftwSign sign = FftwSign.FFTW_FORWARD, FftwFlags flags = FftwFlags.FFTW_MEASURE)
         {
             ioArray = new FftwArray(DftLength(n0));
             return Dft1D(n0, ioArray, ioArray, sign, flags);
         }
 
-        public static FftwPlan Dft2D(int n0, int n1, FftwArray inArray, FftwArray outArray,
+        /// <summary>
+        /// Creates a 2D DFT plan via the basic interface. See FFTW documentation for details on fftw_plan_dft_2d.
+        /// </summary>
+        /// <remarks>
+        /// This overload accepts user-supplied arrays which are owned by the user and must be disposed by the user
+        /// after the user disposes the plan. Use this overload in less common use cases where the arrays must be user
+        /// supplied or their lifetimes user controlled.
+        /// </remarks>
+        /// <param name="n0">The size of the transform in the 0th dimension</param>
+        /// <param name="n1">The size of the transform in the 1st dimension</param>
+        /// <param name="inArray">The complex data input array</param>
+        /// <param name="outArray">The complex data output array</param>
+        /// <param name="sign">The direction of the transform</param>
+        /// <param name="flags">One or more planner flags, combined by bitwise OR</param>
+        public static FftwPlanDft Dft2D(int n0, int n1, FftwArray inArray, FftwArray outArray,
             FftwSign sign = FftwSign.FFTW_FORWARD, FftwFlags flags = FftwFlags.FFTW_MEASURE)
         {
             int length = DftLength(n0, n1);
             ValidateSign(sign);
             ValidateArray(inArray, length, nameof(inArray));
             ValidateArray(outArray, length, nameof(outArray));
-            return new FftwPlan(flags,
+            return new FftwPlanDft(flags,
                 fftw_plan_dft_2d(n0, n1,
                     inArray.Pointer, outArray.Pointer,
                     (int_t)sign, (uint_t)flags),
                 inArray, outArray);
         }
 
-        public static FftwPlan Dft2D(int n0, int n1, out FftwArray inArray, out FftwArray outArray,
+        /// <summary>
+        /// Creates a 2D DFT plan via the basic interface. See FFTW documentation for details on fftw_plan_dft_2d.
+        /// </summary>
+        /// <remarks>
+        /// This overload creates arrays which are owned by the plan and are disposed by the plan when the user
+        /// disposes the plan. Use this overload for common out of place transform use cases.
+        /// </remarks>
+        /// <param name="n0">The size of the transform in the 0th dimension</param>
+        /// <param name="n1">The size of the transform in the 1st dimension</param>
+        /// <param name="inArray">The complex data input array</param>
+        /// <param name="outArray">The complex data output array</param>
+        /// <param name="sign">The direction of the transform</param>
+        /// <param name="flags">One or more planner flags, combined by bitwise OR</param>
+        public static FftwPlanDft Dft2D(int n0, int n1, out FftwArray inArray, out FftwArray outArray,
             FftwSign sign = FftwSign.FFTW_FORWARD, FftwFlags flags = FftwFlags.FFTW_MEASURE)
         {
             int length = DftLength(n0, n1);
@@ -177,28 +318,70 @@ namespace Fftw.Net
             return Dft2D(n0, n1, inArray, outArray, sign, flags);
         }
 
-        public static FftwPlan Dft2D(int n0, int n1, out FftwArray ioArray,
+        /// <summary>
+        /// Creates a 2D DFT plan via the basic interface. See FFTW documentation for details on fftw_plan_dft_2d.
+        /// </summary>
+        /// <remarks>
+        /// This overload creates an array which is owned by the plan and is disposed by the plan when the user
+        /// disposes the plan. Use this overload for common in place transform use cases.
+        /// </remarks>
+        /// <param name="n0">The size of the transform in the 0th dimension</param>
+        /// <param name="n1">The size of the transform in the 1st dimension</param>
+        /// <param name="inArray">The complex data input array</param>
+        /// <param name="outArray">The complex data output array</param>
+        /// <param name="sign">The direction of the transform</param>
+        /// <param name="flags">One or more planner flags, combined by bitwise OR</param>
+        public static FftwPlanDft Dft2D(int n0, int n1, out FftwArray ioArray,
             FftwSign sign = FftwSign.FFTW_FORWARD, FftwFlags flags = FftwFlags.FFTW_MEASURE)
         {
             ioArray = new FftwArray(DftLength(n0, n1));
             return Dft2D(n0, n1, ioArray, ioArray, sign, flags);
         }
 
-        public static FftwPlan Dft3D(int n0, int n1, int n2, FftwArray inArray, FftwArray outArray,
+        /// <summary>
+        /// Creates a 3D DFT plan via the basic interface. See FFTW documentation for details on fftw_plan_dft_3d.
+        /// </summary>
+        /// <remarks>
+        /// This overload accepts user-supplied arrays which are owned by the user and must be disposed by the user
+        /// after the user disposes the plan. Use this overload in less common use cases where the arrays must be user
+        /// supplied or their lifetimes user controlled.
+        /// </remarks>
+        /// <param name="n0">The size of the transform in the 0th dimension</param>
+        /// <param name="n1">The size of the transform in the 1st dimension</param>
+        /// <param name="n2">The size of the transform in the 2nd dimension</param>
+        /// <param name="inArray">The complex data input array</param>
+        /// <param name="outArray">The complex data output array</param>
+        /// <param name="sign">The direction of the transform</param>
+        /// <param name="flags">One or more planner flags, combined by bitwise OR</param>
+        public static FftwPlanDft Dft3D(int n0, int n1, int n2, FftwArray inArray, FftwArray outArray,
             FftwSign sign = FftwSign.FFTW_FORWARD, FftwFlags flags = FftwFlags.FFTW_MEASURE)
         {
             int length = DftLength(n0, n1, n2);
             ValidateSign(sign);
             ValidateArray(inArray, length, nameof(inArray));
             ValidateArray(outArray, length, nameof(outArray));
-            return new FftwPlan(flags,
+            return new FftwPlanDft(flags,
                 fftw_plan_dft_3d(n0, n1, n2,
                     inArray.Pointer, outArray.Pointer,
                     (int_t)sign, (uint_t)flags),
                 inArray, outArray);
         }
 
-        public static FftwPlan Dft3D(int n0, int n1, int n2, out FftwArray inArray, out FftwArray outArray,
+        /// <summary>
+        /// Creates a 3D DFT plan via the basic interface. See FFTW documentation for details on fftw_plan_dft_3d.
+        /// </summary>
+        /// <remarks>
+        /// This overload creates arrays which are owned by the plan and are disposed by the plan when the user
+        /// disposes the plan. Use this overload for common out of place transform use cases.
+        /// </remarks>
+        /// <param name="n0">The size of the transform in the 0th dimension</param>
+        /// <param name="n1">The size of the transform in the 1st dimension</param>
+        /// <param name="n2">The size of the transform in the 2nd dimension</param>
+        /// <param name="inArray">The complex data input array</param>
+        /// <param name="outArray">The complex data output array</param>
+        /// <param name="sign">The direction of the transform</param>
+        /// <param name="flags">One or more planner flags, combined by bitwise OR</param>
+        public static FftwPlanDft Dft3D(int n0, int n1, int n2, out FftwArray inArray, out FftwArray outArray,
             FftwSign sign = FftwSign.FFTW_FORWARD, FftwFlags flags = FftwFlags.FFTW_MEASURE)
         {
             int length = DftLength(n0, n1, n2);
@@ -207,28 +390,67 @@ namespace Fftw.Net
             return Dft3D(n0, n1, n2, inArray, outArray, sign, flags);
         }
 
-        public static FftwPlan Dft3D(int n0, int n1, int n2, out FftwArray ioArray,
+        /// <summary>
+        /// Creates a 3D DFT plan via the basic interface. See FFTW documentation for details on fftw_plan_dft_3d.
+        /// </summary>
+        /// <remarks>
+        /// This overload creates an array which is owned by the plan and is disposed by the plan when the user
+        /// disposes the plan. Use this overload for common in place transform use cases.
+        /// </remarks>
+        /// <param name="n0">The size of the transform in the 0th dimension</param>
+        /// <param name="n1">The size of the transform in the 1st dimension</param>
+        /// <param name="n2">The size of the transform in the 2nd dimension</param>
+        /// <param name="inArray">The complex data input array</param>
+        /// <param name="outArray">The complex data output array</param>
+        /// <param name="sign">The direction of the transform</param>
+        /// <param name="flags">One or more planner flags, combined by bitwise OR</param>
+        public static FftwPlanDft Dft3D(int n0, int n1, int n2, out FftwArray ioArray,
             FftwSign sign = FftwSign.FFTW_FORWARD, FftwFlags flags = FftwFlags.FFTW_MEASURE)
         {
             ioArray = new FftwArray(DftLength(n0, n1, n2));
             return Dft3D(n0, n1, n2, ioArray, ioArray, sign, flags);
         }
 
-        public static FftwPlan Dft(int[] n, FftwArray inArray, FftwArray outArray,
+        /// <summary>
+        /// Creates a DFT plan via the basic interface. See FFTW documentation for details on fftw_plan_dft.
+        /// </summary>
+        /// <remarks>
+        /// This overload accepts user-supplied arrays which are owned by the user and must be disposed by the user
+        /// after the user disposes the plan. Use this overload in less common use cases where the arrays must be user
+        /// supplied or their lifetimes user controlled.
+        /// </remarks>
+        /// <param name="n">The size of the transform in each dimension (the length of n is the rank)</param>
+        /// <param name="inArray">The complex data input array</param>
+        /// <param name="outArray">The complex data output array</param>
+        /// <param name="sign">The direction of the transform</param>
+        /// <param name="flags">One or more planner flags, combined by bitwise OR</param>
+        public static FftwPlanDft Dft(int[] n, FftwArray inArray, FftwArray outArray,
             FftwSign sign = FftwSign.FFTW_FORWARD, FftwFlags flags = FftwFlags.FFTW_MEASURE)
         {
             int length = DftLength(n);
             ValidateSign(sign);
             ValidateArray(inArray, length, nameof(inArray));
             ValidateArray(outArray, length, nameof(outArray));
-            return new FftwPlan(flags,
+            return new FftwPlanDft(flags,
                 fftw_plan_dft(n.Length, n,
                     inArray.Pointer, outArray.Pointer,
                     (int_t)sign, (uint_t)flags),
                 inArray, outArray);
         }
 
-        public static FftwPlan Dft(int[] n, out FftwArray inArray, out FftwArray outArray,
+        /// <summary>
+        /// Creates a DFT plan via the basic interface. See FFTW documentation for details on fftw_plan_dft.
+        /// </summary>
+        /// <remarks>
+        /// This overload creates arrays which are owned by the plan and are disposed by the plan when the user
+        /// disposes the plan. Use this overload for common out of place transform use cases.
+        /// </remarks>
+        /// <param name="n">The size of the transform in each dimension (the length of n is the rank)</param>
+        /// <param name="inArray">The complex data input array</param>
+        /// <param name="outArray">The complex data output array</param>
+        /// <param name="sign">The direction of the transform</param>
+        /// <param name="flags">One or more planner flags, combined by bitwise OR</param>
+        public static FftwPlanDft Dft(int[] n, out FftwArray inArray, out FftwArray outArray,
             FftwSign sign = FftwSign.FFTW_FORWARD, FftwFlags flags = FftwFlags.FFTW_MEASURE)
         {
             int length = DftLength(n);
@@ -237,7 +459,19 @@ namespace Fftw.Net
             return Dft(n, inArray, outArray, sign, flags);
         }
 
-        public static FftwPlan Dft(int[] n, out FftwArray ioArray,
+        /// <summary>
+        /// Creates a DFT plan via the basic interface. See FFTW documentation for details on fftw_plan_dft.
+        /// </summary>
+        /// <remarks>
+        /// This overload creates an array which is owned by the plan and is disposed by the plan when the user
+        /// disposes the plan. Use this overload for common in place transform use cases.
+        /// </remarks>
+        /// <param name="n">The size of the transform in each dimension (the length of n is the rank)</param>
+        /// <param name="inArray">The complex data input array</param>
+        /// <param name="outArray">The complex data output array</param>
+        /// <param name="sign">The direction of the transform</param>
+        /// <param name="flags">One or more planner flags, combined by bitwise OR</param>
+        public static FftwPlanDft Dft(int[] n, out FftwArray ioArray,
             FftwSign sign = FftwSign.FFTW_FORWARD, FftwFlags flags = FftwFlags.FFTW_MEASURE)
         {
             ioArray = new FftwArray(DftLength(n));
@@ -608,26 +842,70 @@ namespace Fftw.Net
 
         #endregion
 
+        #region Advanced Interface
+
+        /*public static FftwPlan ManyDft(int[] n, int howmany,
+            FftwArray inArray, int[] inembed, int istride, int idist,
+            FftwArray outArray, int[] onembed, int ostride, int odist,
+            FftwSign sign = FftwSign.FFTW_FORWARD, FftwFlags flags = FftwFlags.FFTW_MEASURE)
+        {
+            if (inembed == null)
+                inembed = n;
+            else
+            {
+
+            }
+            if (onembed == null)
+                onembed = n;
+        }*/
+
+        #endregion
+
         public void Execute()
         {
-            fftw_execute(pointer);
+            fftw_execute(Pointer);
         }
 
-        public void Dispose()
+        /// <summary>
+        /// Implementation of Dispose pattern.
+        /// </summary>
+        /// <param name="disposing">True if disposing, false if finalizing.</param>
+        private protected virtual void Dispose(bool disposing)
         {
-            lock (lockObject)
+            // protect from multiple disposal
+            if (disposed) return;
+            if (disposing)
             {
-                if (disposed)
-                    return;
-                disposed = true;
+                foreach (var array in owned)
+                {
+                    array.DecrementPlans();
+                }
             }
-            fftw_destroy_plan(pointer);
+            fftw_destroy_plan(Pointer);
             GC.SuppressFinalize(this);
+            disposed = true;
         }
+
+        /// </inheritdoc>
+        public void Dispose() => Dispose(true);
 
         ~FftwPlan()
         {
-            Dispose();
+            Dispose(false);
+        }
+    }
+
+    public sealed class FftwPlanDft : FftwPlan
+    {
+        internal FftwPlanDft(FftwFlags flags, IntPtr pointer, FftwArray inArray, FftwArray outArray) :
+            base(flags, pointer, inArray, outArray)
+        {
+
+        }
+
+        public void Execute(FftwArray inArray, FftwArray outArray)
+        {
+            //fftw_execute_dft(pointer);
         }
     }
 }

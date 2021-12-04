@@ -1,12 +1,44 @@
 using System;
 using System.Runtime.InteropServices;
+using System.Threading;
 
 using static Fftw.Net.FftwBindings;
 
 namespace Fftw.Net
 {
+    /// <summary>
+    /// FftwArray encapsulates a span of underlying memory and manages the lifetime of these underlying memory
+    /// resources.
+    /// </summary>
+    /// <remarks>
+    /// FftwArray supports arrays backed by unmanaged memory allocations from FFTW (preferred), pinned managed
+    /// array objects (long lived pins may impact garbage collector performance), and arbitrary memory supplied by a
+    /// pointer (unsafe, use with care). SIMD is supported when using arrays backed by unmanaged allocations from FFTW
+    /// and the native library was compiled with SIMD support. FftwArray has limited thread safety. Slicing and property
+    /// getters are thread safe. Properties and methods are not checked for disposal state.
+    /// </remarks>
     public class FftwArray: IDisposable
     {
+        /// <summary>
+        /// The number of yet to be disposed slices of the array, applicable for roots of slices
+        /// </summary>
+        private int slices = 0;
+
+        /// <summary>
+        /// The number of yet to be disposed plans in which the array is involved
+        /// </summary>
+        private int plans = 0;
+
+        /// <summary>
+        /// The root array from which the slice was created, applicable for slices
+        /// <summary>
+        private FftwArray root = null;
+
+        /// <summary>
+        /// The length of the array
+        /// <summary>
+        private long length;
+
         /// <summary>
         /// Indicates whether this object owns memory at Pointer which has been allocated through FFTW
         /// </summary>
@@ -23,20 +55,21 @@ namespace Fftw.Net
         private bool disposed = false;
 
         /// <summary>
-        /// An object used as a lock to ensure thread safety during object disposal
-        /// </summary>
-        private object lockObject = new object();
-
-        /// <summary>
         /// A pointer to the contents of the array, either supplied externally, allocated on the unmanaged heap, or
         /// from a pinned array
         /// </summary>
         public IntPtr Pointer { get; }
 
         /// <summary>
-        /// The length of the array
+        /// Gets the length of the array.
         /// </summary>
-        public int Length { get; }
+        /// <exception cref="OverflowException">The length exceeds <see cref="Int32.MaxValue"/>.</exception>
+        public int Length => checked((int)length);
+
+        /// <summary>
+        /// Gets the length of the array.
+        /// </summary>
+        public long LongLength => length;
 
         /// <summary>
         /// For the purpose of ensuring that plans which expect aligned data recieve it for new array executes, this
@@ -44,64 +77,243 @@ namespace Fftw.Net
         /// </summary>
         internal bool FftwAllocated => owning;
 
-        public Span<double> Span
-        {
-            get
-            {
-                unsafe
-                {
-                    return new Span<double>(Pointer.ToPointer(), Length);
-                }
-            }
-        }
-
-        public FftwArray(int length)
+        /// <summary>
+        /// Initializes an instance of <see cref="FftwArray"/> backed by memory allocated on the unmanaged heap using
+        /// fftw_malloc for the lifetime of the array until it is disposed at which point it is freed with fftw_free
+        /// <summary/>
+        /// <param name="length">The number of elements in the array</param>
+        /// <exception cref="ArgumentOutOfRangeException">Specified length is less than 1.</exception>
+        /// <exception cref="OverflowException">
+        /// The calculation of the physical allocation size overflowed or the result could not be cast to
+        /// <see cref="UIntPtr"/>.
+        /// </exception>
+        /// <exception cref="OutOfMemoryException">The physical allocation size could not be satisfied.</exception>
+        public FftwArray(long length)
         {
             if (length < 1)
                 throw new ArgumentException("Arrays must contain at least one element.", nameof(length));
-            Length = length;
-            Pointer = fftw_malloc((UIntPtr)(sizeof(double) * Length));
+            this.length = length;
+            try
+            {
+                checked
+                {
+                    Pointer = fftw_malloc((UIntPtr)(sizeof(double) * length));
+                }
+            }
+            catch (OverflowException ex)
+            {
+                throw new OverflowException("The physical size of the allocation is unreasonably large.", ex);
+            }
+            if (Pointer == IntPtr.Zero)
+                throw new OutOfMemoryException("The system could not allocate the requested amount of memory.");
             owning = true;
         }
 
+        /// <summary>
+        /// Initializes an instance of <see cref="FftwArray"/> backed by memory allocated on the unmanaged heap using
+        /// fftw_malloc for the lifetime of the array until it is disposed at which point it is freed with fftw_free
+        /// <summary/>
+        /// <param name="length">The number of elements in the array</param>
+        /// <exception cref="ArgumentOutOfRangeException">Specified length is less than 1.</exception>
+        /// <exception cref="OverflowException">
+        /// The calculation of the physical allocation size overflowed or the result could not be cast to
+        /// <see cref="UIntPtr"/>.
+        /// </exception>
+        /// <exception cref="OutOfMemoryException">The physical allocation size could not be satisfied.</exception>
+        public FftwArray(int length) : this((long)length) { }
+
+        /// <summary>
+        /// Initializes an instance of <see cref="FftwArray"/> backed by an array object which is pinned for the
+        /// lifetime of the array until it is disposed. Modifying data in the FftwArray alters the data in the
+        /// underlying Array object.
+        /// <summary>
+        /// <remarks>
+        /// Pinning large objects can severely affect the efficiency of the runtime's garbage collector. Objects
+        /// constructed by this method should be disposed as soon as possible.
+        /// </remarks>
         public FftwArray(double[] array)
         {
-            Length = array.Length;
+            length = array.LongLength;
             handle = GCHandle.Alloc(array, GCHandleType.Pinned);
             Pointer = handle.Value.AddrOfPinnedObject();
         }
 
-        public unsafe FftwArray(IntPtr pointer, int length)
+        /// <summary>
+        /// Initializes an instance of <see cref="FftwArray"/> backed by arbitrary memory. No action is taken upon
+        /// disposal.
+        /// </summary>
+        /// <remarks>
+        /// Throws an <see cref="ArgumentOutOfRangeException"/> for length &lt; 1.
+        /// </remarks>
+        /// <param name="pointer">A pointer to the memory used by the array</param>
+        /// <param name="length">The number of elements in the array</param>
+        public unsafe FftwArray(IntPtr pointer, long length)
         {
             if (length < 1)
-                throw new ArgumentException("Arrays must contain at least one element.", nameof(length));
-            Length = length;
+                throw new ArgumentOutOfRangeException(nameof(length));
+            this.length = length;
             Pointer = pointer;
         }
 
+        /// <summary>
+        /// Initializes an instance of <see cref="FftwArray"/> backed by arbitrary memory. No action is taken upon
+        /// disposal.
+        /// </summary>
+        /// <param name="pointer">A pointer to the memory used by the array</param>
+        /// <param name="length">The number of elements in the array</param>
+        /// <exception cref="ArgumentOutOfRangeException">Specified length is less than 1.</exception>
+        public unsafe FftwArray(IntPtr pointer, int length) : this(pointer, (long)length) { }
+
+        /// <summary>
+        /// Initializes an instance of <see cref="FftwArray"/> backed by memory owned by a root array. Instantiation
+        /// increment's the root's slices counter and disposal decrements it again.
+        /// </summary>
+        /// <param name="pointer">A pointer to the memory used by the array</param>
+        /// <param name="length">The number of elements in the array</param>
+        /// <param name="root">The root array which owns the memory</param>
+        private FftwArray(IntPtr pointer, long length, FftwArray root)
+        {
+            Pointer = pointer;
+            this.length = length;
+            this.root = root;
+            root.IncrementSlices();
+        }
+
+        /// <summary>
+        /// Slices a subsequence from an array starting at a specified index and running for a specified length.
+        /// </summary>
+        /// <remarks>
+        /// The slice is backed by the same memory and must be disposed before the root from which it was sliced may be
+        /// disposed. A slice may be sliced, but both the slice and its slice share the same root. Slices of a root
+        /// may be disposed in any order. Slices are useful for accessing the data in large arrays or for advanced
+        /// use-cases where passing different portions of a single array as arguments to FFTW routines is desirable.
+        /// </remarks>
+        /// <param name="start">The index of the first element of the slice</param>
+        /// <param name="length">The length of the slice</param>
+        /// <exception cref="ArgumentOutOfRangeException">
+        /// The specified start and length are not a subset of the array or length is less than 1.
+        /// </exception>
+        /// <exception cref="OverflowException">Arithmetic overflowed computing the bounds or slice pointer.</exception>
+        public FftwArray Slice(long start, long length)
+        {
+            try
+            {
+                checked
+                {
+                    if (start < 0 || start >= this.length)
+                        throw new ArgumentOutOfRangeException(nameof(start));
+                    if (length < 1 || start + length > this.length)
+                        throw new ArgumentOutOfRangeException(nameof(length));
+                    unsafe
+                    {
+                        return new FftwArray(new IntPtr((double*)Pointer.ToPointer() + start), length, root ?? this);
+                    }
+                }
+            }
+            catch (OverflowException ex)
+            {
+                throw new OverflowException("Arithmetic overflow in computing the slice.", ex);
+            }
+        }
+
+        /// <summary>
+        /// Slices a subsequence from an array starting at a specified index and running for a specified length.
+        /// </summary>
+        /// <remarks>
+        /// The slice is backed by the same memory and must be disposed before the root from which it was sliced may be
+        /// disposed. A slice may be sliced, but both the slice and its slice share the same root. Slices of a root
+        /// may be disposed in any order. Slices are useful for accessing the data in large arrays or for advanced
+        /// use-cases where passing different portions of a single array as arguments to FFTW routines is desirable.
+        /// </remarks>
+        /// <param name="start">The index of the first element of the slice</param>
+        /// <param name="length">The length of the slice</param>
+        /// <exception cref="ArgumentOutOfRangeException">
+        /// The specified start and length are not a subset of the array or length is less than 1.
+        /// </exception>
+        /// <exception cref="OverflowException">Arithmetic overflowed computing the bounds or slice pointer.</exception>
+        public FftwArray Slice(int start, int length) => Slice((int)start, (int)length);
+
+        /// <summary>
+        /// Slices a subsequence from an array starting at a specified index and running to the end of the array.
+        /// </summary>
+        /// <remarks>
+        /// The slice is backed by the same memory and must be disposed before the root from which it was sliced may be
+        /// disposed. A slice may be sliced, but both the slice and its slice share the same root. Slices of a root
+        /// may be disposed in any order. Slices are useful for accessing the data in large arrays or for advanced
+        /// use-cases where passing different portions of a single array as arguments to FFTW routines is desirable.
+        /// </remarks>
+        /// <param name="start">The index of the first element of the slice</param>
+        /// <exception cref="ArgumentOutOfRangeException">The specified start is outside the array.</exception>
+        /// <exception cref="OverflowException">Arithmetic overflowed computing the bounds or slice pointer.</exception>
+        public FftwArray Slice(long start) => Slice(start, length - start);
+
+        /// <summary>
+        /// Slices a subsequence from an array starting at a specified index and running to the end of the array.
+        /// </summary>
+        /// <remarks>
+        /// The slice is backed by the same memory and must be disposed before the root from which it was sliced may be
+        /// disposed. A slice may be sliced, but both the slice and its slice share the same root. Slices of a root
+        /// may be disposed in any order. Slices are useful for accessing the data in large arrays or for advanced
+        /// use-cases where passing different portions of a single array as arguments to FFTW routines is desirable.
+        /// </remarks>
+        /// <param name="start">The index of the first element of the slice</param>
+        /// <exception cref="ArgumentOutOfRangeException">The specified start is outside the array.</exception>
+        /// <exception cref="OverflowException">Arithmetic overflowed computing the bounds or slice pointer.</exception>
+        public FftwArray Slice(int start) => Slice((int)start);
+
+        /// <summary>
+        /// Atomically increments the count of yet to be disposed plans holding a reference to the array.
+        /// </summary>
+        internal void IncrementPlans() => Interlocked.Increment(ref plans);
+
+        /// <summary>
+        /// Atomically decrements the count of yet to be disposed plans holding a reference to the array.
+        /// </summary>
+        internal void DecrementPlans() => Interlocked.Decrement(ref plans);
+
+        /// <summary>
+        /// Atomically increments the count of yet to be disposed slices holding a reference to the array.
+        /// </summary>
+        private void IncrementSlices() => Interlocked.Increment(ref slices);
+
+        /// <summary>
+        /// Atomically decrements the count of yet to be disposed slices holding a reference to the array.
+        /// </summary>
+        private void DecrementSlices() => Interlocked.Decrement(ref slices);
+
+        /// <summary>
+        /// Implementation of Dispose pattern.
+        /// </summary>
+        /// <param name="disposing">True if disposing, false if finalizing.</param>
         protected virtual void Dispose(bool disposing)
         {
-            lock (lockObject)
+            // protect from multiple disposal
+            if (disposed) return;
+            if (disposing)
             {
-                if (disposed)
+                if (root == null && slices != 0 || plans != 0)
+                {
+                    // In this event, user disposal was attempted while other objects are potentially still using the
+                    // array's memory. This is a very bad situation, but it is inappropriate to throw an exception since
+                    // exceptions during disposal are generally handled quite poorly. Instead, we'll keep disposed false
+                    // and let the finalizer run. The resources may not be cleaned up quickly, but it will happen
+                    // eventually.
                     return;
-                disposed = true;
+                }
+                GC.SuppressFinalize(this);
+                if (root != null)
+                    root.DecrementSlices();
             }
             if (owning)
                 fftw_free(Pointer);
             else if (handle.HasValue)
                 handle.Value.Free();
+            disposed = true;
         }
 
-        public void Dispose()
-        {
-            Dispose(true);
-            GC.SuppressFinalize(this);
-        }
+        /// </inheritdoc>
+        public void Dispose() => Dispose(true);
 
-        ~FftwArray()
-        {
-            Dispose(false);
-        }
+        ~FftwArray() => Dispose(false);
     }
 }
