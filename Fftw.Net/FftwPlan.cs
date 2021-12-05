@@ -17,6 +17,11 @@ namespace Fftw.Net
     /// </summary>
     public class FftwPlan : IDisposable
     {
+        #region Private Nested Types
+
+        /// <summary>
+        /// Uniquely identifies a new-array execute function.
+        /// </summary>
         private enum NewArrayExecFn
         {
             Dft,
@@ -27,6 +32,30 @@ namespace Fftw.Net
             SplitDftC2r,
             R2r
         }
+
+        /// <summary>
+        /// Contains information on the constraints imposed on new-array execute methods including the appropriate
+        /// new-array execute function, minimum lengths for the arrays, and whether the plan is in-place.
+        /// </summary>
+        private struct NewArrayExecConstraints
+        {
+            public NewArrayExecFn newArrayExecFn;
+            public long length0, length1, length2, length3;
+            public bool inPlace;
+
+            public NewArrayExecConstraints(NewArrayExecFn newArrayExecFn, bool inPlace,
+                long length0, long length1, long length2 = 0, long length3 = 0)
+            {
+                this.newArrayExecFn = newArrayExecFn;
+                this.inPlace = inPlace;
+                this.length0 = length0;
+                this.length1 = length1;
+                this.length2 = length2;
+                this.length3 = length3;
+            }
+        }
+
+        #endregion
 
         #region Private Fields
 
@@ -50,29 +79,9 @@ namespace Fftw.Net
         private bool owned;
         
         /// <summary>
-        /// Indicates the appropriate new-array execute function.
+        /// Constraints on the new-array execute methods
         /// </summary>
-        private NewArrayExecFn newArrayExecFn;
-
-        /// <summary>
-        /// Required length of the first array
-        /// </summary>
-        private long length0;
-
-        /// <summary>
-        /// Required length of the second array, if applicable
-        /// </summary>
-        private long length1;
-
-        /// <summary>
-        /// Required length of the third array, if applicable
-        /// </summary>
-        private long length2;
-
-        /// <summary>
-        /// Required length of the fourth array, if applicable
-        /// </summary>
-        private long length3;
+        private NewArrayExecConstraints constraints;
 
         #endregion
 
@@ -83,35 +92,24 @@ namespace Fftw.Net
         /// </summary>
         /// <param name="flags">The flags passed to the planner routine.</param>
         /// <param name="pointer">The pointer to the plan returned by the planner routine</param>
-        /// <param name="newArrayExecFn">The appropriate new-array execute function for this plan</param>
+        /// <param name="newArrayExecConstraints">The new-array execute constraints for this plan</param>
         /// <param name="arrays">The arrays used by the planner routine</param>
-        private FftwPlan(FftwFlags flags, IntPtr pointer, NewArrayExecFn newArrayExecFn, params FftwArray[] arrays)
+        private FftwPlan(FftwFlags flags, IntPtr pointer, NewArrayExecConstraints constraints, params FftwArray[] arrays)
         {
             if (pointer == IntPtr.Zero)
                 throw new ArgumentException("A NULL plan was returned by the FFTW planner method. " +
                     "This is probably due to a bad flag. Please check the FFTW documentation for details.");
             this.pointer = pointer;
-            this.newArrayExecFn = newArrayExecFn;
+            this.constraints = constraints;
             this.arrays = arrays;
             mustAlign = (flags & FftwFlags.FFTW_UNALIGNED) == 0;
             foreach (var array in arrays)
-            {
-                mustAlign = mustAlign && array.FftwAllocated;
                 array.IncrementPlans();
-            }
             // bit of a hack - if a planning method calls another planning method, it is because the first is a wrapper
             // these wrappers allocate the arrays for the user, and so these arrays are owned by the plan
             var trace = new StackTrace();
             if (trace.FrameCount > 2 && trace.GetFrame(2).GetMethod().DeclaringType == typeof(FftwPlan))
                 owned = true;
-            // lengths of user supplied arrays may be longer than required, so this is suboptimal
-            length0 = arrays[0].Length;
-            if (arrays.Length > 1)
-                length1 = arrays[1].Length;
-            if (arrays.Length > 2)
-                length2 = arrays[2].Length;
-            if (arrays.Length > 3)
-                length3 = arrays[3].Length;
         }
 
         #endregion
@@ -136,9 +134,9 @@ namespace Fftw.Net
         /// <param name="length">The minimum length requirement</param>
         /// <param name="argument">The name of the array's argument in the factory method</param>
         /// <exception cref="ArgumentException">Validation check failed</exception>
-        private static void ValidateArray(FftwArray array, int length, string argument)
+        private static void ValidateArray(FftwArray array, long length, string argument)
         {
-            if (array.Length < length)
+            if (array.LongLength < length)
                 throw new ArgumentException($"Array length must be at least {length}.", argument);
         }
 
@@ -252,6 +250,69 @@ namespace Fftw.Net
         /// </summary>
         private static bool IsInPlace(FftwArray inArray, FftwArray outArray) =>
             inArray.Pointer == outArray.Pointer;
+        
+        /// <summary>
+        /// Gets the method name to use a given new-array execute function
+        /// </summary>
+        /// <param name="newArrayExecFn">The new-array execute function</param>
+        private static string NameForNewArrayExecFn(NewArrayExecFn newArrayExecFn)
+        {
+            switch (newArrayExecFn)
+            {
+                case NewArrayExecFn.Dft:
+                    return nameof(ExecuteDft);
+                case NewArrayExecFn.SplitDft:
+                    return nameof(ExecuteSplitDft);
+                case NewArrayExecFn.DftR2c:
+                    return nameof(ExecuteDftR2c);
+                case NewArrayExecFn.SplitDftR2c:
+                    return nameof(ExecuteSplitDftR2c);
+                case NewArrayExecFn.DftC2r:
+                    return nameof(ExecuteDftC2r);
+                case NewArrayExecFn.SplitDftC2r:
+                    return nameof(ExecuteSplitDftC2r);
+                case NewArrayExecFn.R2r:
+                    return nameof(ExecuteR2r);
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(newArrayExecFn));
+            }
+        }
+
+        /// <summary>
+        /// Validates the use of a given new-array execute function
+        /// </summary>
+        /// <param name="newArrayExecFn">The new-array execute function</param>
+        private void ValidateNewArrayExecFn(NewArrayExecFn expected)
+        {
+            if (constraints.newArrayExecFn != expected)
+                throw new InvalidOperationException("Cannot use this new-array execute method for this plan. " +
+                    $"Please use {NameForNewArrayExecFn(constraints.newArrayExecFn)} instead.");
+        }
+
+        /// <summary>
+        /// Checks that arguments are in-place as expected
+        /// </summary>
+        /// <param name="array0">The first array to check</param>
+        /// <param name="array1">The second array to check</param>
+        /// <param name="name0">The parameter name for the first array</param>
+        /// <param name="name1">The parameter name for the second array</param>
+        private void ValidateIsInPlace(FftwArray array0, FftwArray array1, string name0, string name1)
+        {
+            if (!IsInPlace(array0, array1))
+                throw new InvalidOperationException("This plan was created as an in-place transform. " +
+                    $"Please pass the same array for both {name0} and {name1}");
+        }
+
+        /// <summary>
+        /// Validates memory alignment of arrays
+        /// </summary>
+        /// <param name="arrays">Arrays to test</param>
+        private void ValidateAlignment(params FftwArray[] arrays)
+        {
+            if (mustAlign && arrays.Any(x => !x.FftwAllocated))
+                throw new InvalidOperationException("This plan was created without the FFTW_UNALIGNED flag. " +
+                    "All array arguments should be allocated by FFTW to ensure proper memory alignment.");
+        }
 
         #endregion
 
@@ -283,7 +344,7 @@ namespace Fftw.Net
                 fftw_plan_dft_1d(n0,
                     inArray.Pointer, outArray.Pointer,
                     (int_t)sign, (uint_t)flags),
-                NewArrayExecFn.Dft,
+                new NewArrayExecConstraints(NewArrayExecFn.Dft, IsInPlace(inArray, outArray), length, length),
                 inArray, outArray);
         }
 
@@ -351,7 +412,7 @@ namespace Fftw.Net
                 fftw_plan_dft_2d(n0, n1,
                     inArray.Pointer, outArray.Pointer,
                     (int_t)sign, (uint_t)flags),
-                NewArrayExecFn.Dft,
+                new NewArrayExecConstraints(NewArrayExecFn.Dft, IsInPlace(inArray, outArray), length, length),
                 inArray, outArray);
         }
 
@@ -423,7 +484,7 @@ namespace Fftw.Net
                 fftw_plan_dft_3d(n0, n1, n2,
                     inArray.Pointer, outArray.Pointer,
                     (int_t)sign, (uint_t)flags),
-                NewArrayExecFn.Dft,
+                new NewArrayExecConstraints(NewArrayExecFn.Dft, IsInPlace(inArray, outArray), length, length),
                 inArray, outArray);
         }
 
@@ -495,7 +556,7 @@ namespace Fftw.Net
                 fftw_plan_dft(n.Length, n,
                     inArray.Pointer, outArray.Pointer,
                     (int_t)sign, (uint_t)flags),
-                NewArrayExecFn.Dft,
+                new NewArrayExecConstraints(NewArrayExecFn.Dft, IsInPlace(inArray, outArray), length, length),
                 inArray, outArray);
         }
 
@@ -547,14 +608,15 @@ namespace Fftw.Net
             FftwFlags flags = FftwFlags.FFTW_MEASURE)
         {
             int outLength = DftComplexLength(n0);
-            int inLength = IsInPlace(inArray, outArray) ? outLength : DftRealLength(n0);
+            bool isInPlace = IsInPlace(inArray, outArray);
+            int inLength = isInPlace ? outLength : DftRealLength(n0);
             ValidateArray(inArray, inLength, nameof(inArray));
             ValidateArray(outArray, outLength, nameof(outArray));
             return new FftwPlan(flags,
                 fftw_plan_dft_r2c_1d(n0,
                     inArray.Pointer, outArray.Pointer,
                     (uint_t)flags),
-                NewArrayExecFn.DftR2c,
+                new NewArrayExecConstraints(NewArrayExecFn.DftR2c, isInPlace, inLength, outLength),
                 inArray, outArray);
         }
 
@@ -577,14 +639,15 @@ namespace Fftw.Net
             FftwFlags flags = FftwFlags.FFTW_MEASURE)
         {
             int outLength = DftComplexLength(n0, n1);
-            int inLength = IsInPlace(inArray, outArray) ? outLength : DftRealLength(n0, n1);
+            bool isInPlace = IsInPlace(inArray, outArray);
+            int inLength = isInPlace ? outLength : DftRealLength(n0, n1);
             ValidateArray(inArray, inLength, nameof(inArray));
             ValidateArray(outArray, outLength, nameof(outArray));
             return new FftwPlan(flags,
                 fftw_plan_dft_r2c_2d(n0, n1,
                     inArray.Pointer, outArray.Pointer,
                     (uint_t)flags),
-                NewArrayExecFn.DftR2c,
+                new NewArrayExecConstraints(NewArrayExecFn.DftR2c, isInPlace, inLength, outLength),
                 inArray, outArray);
         }
 
@@ -607,14 +670,15 @@ namespace Fftw.Net
             FftwFlags flags = FftwFlags.FFTW_MEASURE)
         {
             int outLength = DftComplexLength(n0, n1, n2);
-            int inLength = IsInPlace(inArray, outArray) ? outLength : DftRealLength(n0, n1, n2);
+            bool isInPlace = IsInPlace(inArray, outArray);
+            int inLength = isInPlace ? outLength : DftRealLength(n0, n1, n2);
             ValidateArray(inArray, inLength, nameof(inArray));
             ValidateArray(outArray, outLength, nameof(outArray));
             return new FftwPlan(flags,
                 fftw_plan_dft_r2c_3d(n0, n1, n2,
                     inArray.Pointer, outArray.Pointer,
                     (uint_t)flags),
-                NewArrayExecFn.DftR2c,
+                new NewArrayExecConstraints(NewArrayExecFn.DftR2c, isInPlace, inLength, outLength),
                 inArray, outArray);
         }
 
@@ -637,14 +701,15 @@ namespace Fftw.Net
             FftwFlags flags = FftwFlags.FFTW_MEASURE)
         {
             int outLength = DftComplexLength(n);
-            int inLength = IsInPlace(inArray, outArray) ? outLength : DftRealLength(n);
+            bool isInPlace = IsInPlace(inArray, outArray);
+            int inLength = isInPlace ? outLength : DftRealLength(n);
             ValidateArray(inArray, outLength, nameof(inArray));
             ValidateArray(outArray, inLength, nameof(outArray));
             return new FftwPlan(flags,
                 fftw_plan_dft_r2c(n.Length, n,
                     inArray.Pointer, outArray.Pointer,
                     (uint_t)flags),
-                NewArrayExecFn.DftR2c,
+                new NewArrayExecConstraints(NewArrayExecFn.DftR2c, isInPlace, inLength, outLength),
                 inArray, outArray);
         }
 
@@ -671,14 +736,15 @@ namespace Fftw.Net
             FftwFlags flags = FftwFlags.FFTW_MEASURE)
         {
             int inLength = DftComplexLength(n0);
-            int outLength = IsInPlace(inArray, outArray) ? inLength : DftRealLength(n0);
+            bool isInPlace = IsInPlace(inArray, outArray);
+            int outLength = isInPlace ? inLength : DftRealLength(n0);
             ValidateArray(inArray, inLength, nameof(inArray));
             ValidateArray(outArray, outLength, nameof(outArray));
             return new FftwPlan(flags,
                 fftw_plan_dft_c2r_1d(n0,
                     inArray.Pointer, outArray.Pointer,
                     (uint_t)flags),
-                NewArrayExecFn.SplitDftC2r,
+                new NewArrayExecConstraints(NewArrayExecFn.SplitDftC2r, isInPlace, inLength, outLength),
                 inArray, outArray);
         }
 
@@ -701,14 +767,15 @@ namespace Fftw.Net
             FftwFlags flags = FftwFlags.FFTW_MEASURE)
         {
             int inLength = DftComplexLength(n0, n1);
-            int outLength = IsInPlace(inArray, outArray) ? inLength : DftRealLength(n0, n1);
+            bool isInPlace = IsInPlace(inArray, outArray);
+            int outLength = isInPlace ? inLength : DftRealLength(n0, n1);
             ValidateArray(inArray, inLength, nameof(inArray));
             ValidateArray(outArray, outLength, nameof(outArray));
             return new FftwPlan(flags,
                 fftw_plan_dft_c2r_2d(n0, n1,
                     inArray.Pointer, outArray.Pointer,
                     (uint_t)flags),
-                NewArrayExecFn.DftC2r,
+                new NewArrayExecConstraints(NewArrayExecFn.DftC2r, isInPlace, inLength, outLength),
                 inArray, outArray);
         }
 
@@ -731,14 +798,15 @@ namespace Fftw.Net
             FftwFlags flags = FftwFlags.FFTW_MEASURE)
         {
             int inLength = DftComplexLength(n0, n1, n2);
-            int outLength = IsInPlace(inArray, outArray) ? inLength : DftRealLength(n0, n1, n2);
+            bool isInPlace = IsInPlace(inArray, outArray);
+            int outLength = isInPlace ? inLength : DftRealLength(n0, n1, n2);
             ValidateArray(inArray, inLength, nameof(inArray));
             ValidateArray(outArray, outLength, nameof(outArray));
             return new FftwPlan(flags,
                 fftw_plan_dft_c2r_3d(n0, n1, n2,
                     inArray.Pointer, outArray.Pointer,
                     (uint_t)flags),
-                NewArrayExecFn.DftC2r,
+                new NewArrayExecConstraints(NewArrayExecFn.DftC2r, isInPlace, inLength, outLength),
                 inArray, outArray);
         }
 
@@ -761,14 +829,15 @@ namespace Fftw.Net
             FftwFlags flags = FftwFlags.FFTW_MEASURE)
         {
             int inLength = DftComplexLength(n);
-            int outLength = IsInPlace(inArray, outArray) ? inLength : DftRealLength(n);
+            bool isInPlace = IsInPlace(inArray, outArray);
+            int outLength = isInPlace ? inLength : DftRealLength(n);
             ValidateArray(inArray, outLength, nameof(inArray));
             ValidateArray(outArray, inLength, nameof(outArray));
             return new FftwPlan(flags,
                 fftw_plan_dft_c2r(n.Length, n,
                     inArray.Pointer, outArray.Pointer,
                     (uint_t)flags),
-                NewArrayExecFn.DftC2r,
+                new NewArrayExecConstraints(NewArrayExecFn.DftC2r, isInPlace, inLength, outLength),
                 inArray, outArray);
         }
 
@@ -801,7 +870,7 @@ namespace Fftw.Net
                 fftw_plan_r2r_1d(n0,
                     inArray.Pointer, outArray.Pointer,
                     kind0, (uint_t)flags),
-                NewArrayExecFn.R2r,
+                new NewArrayExecConstraints(NewArrayExecFn.R2r, IsInPlace(inArray, outArray), length, length),
                 inArray, outArray);
         }
 
@@ -831,7 +900,7 @@ namespace Fftw.Net
                 fftw_plan_r2r_2d(n0, n1,
                     inArray.Pointer, outArray.Pointer,
                     kind0, kind1, (uint_t)flags),
-                NewArrayExecFn.R2r,
+                new NewArrayExecConstraints(NewArrayExecFn.R2r, IsInPlace(inArray, outArray), length, length),
                 inArray, outArray);
         }
 
@@ -861,7 +930,7 @@ namespace Fftw.Net
                 fftw_plan_r2r_3d(n0, n1, n2,
                     inArray.Pointer, outArray.Pointer,
                     kind0, kind1, kind2, (uint_t)flags),
-                NewArrayExecFn.R2r,
+                new NewArrayExecConstraints(NewArrayExecFn.R2r, IsInPlace(inArray, outArray), length, length),
                 inArray, outArray);
         }
 
@@ -891,7 +960,7 @@ namespace Fftw.Net
                 fftw_plan_r2r(n.Length, n,
                     inArray.Pointer, outArray.Pointer,
                     kind, (uint_t)flags),
-                NewArrayExecFn.R2r,
+                new NewArrayExecConstraints(NewArrayExecFn.R2r, IsInPlace(inArray, outArray), length, length),
                 inArray, outArray);
         }
 
@@ -944,15 +1013,92 @@ namespace Fftw.Net
             fftw_execute(pointer);
         }
 
-        /*
         /// <summary>
         /// Executes the plan on new arrays supplied. See FFTW documentation for details on fftw_execute_dft.
         /// </summary>
         public void ExecuteDft(FftwArray inArray, FftwArray outArray)
         {
+            ValidateNewArrayExecFn(NewArrayExecFn.Dft);
+            ValidateArray(inArray, constraints.length0, nameof(inArray));
+            ValidateArray(outArray, constraints.length1, nameof(outArray));
+            if (constraints.inPlace)
+                ValidateIsInPlace(inArray, outArray, nameof(inArray), nameof(outArray));
+            ValidateAlignment(inArray, outArray);
             fftw_execute_dft(pointer, inArray.Pointer, outArray.Pointer);
         }
-        */
+
+        public void ExecuteSplitDft(FftwArray riArray, FftwArray iiArray, FftwArray roArray, FftwArray ioArray)
+        {
+            ValidateNewArrayExecFn(NewArrayExecFn.Dft);
+            ValidateArray(riArray, constraints.length0, nameof(riArray));
+            ValidateArray(iiArray, constraints.length1, nameof(iiArray));
+            ValidateArray(roArray, constraints.length2, nameof(roArray));
+            ValidateArray(ioArray, constraints.length3, nameof(ioArray));
+            if (constraints.inPlace)
+            {
+                ValidateIsInPlace(riArray, roArray, nameof(riArray), nameof(roArray));
+                ValidateIsInPlace(iiArray, ioArray, nameof(iiArray), nameof(ioArray));
+            }
+            ValidateAlignment(riArray, iiArray, roArray, ioArray);
+            fftw_execute_split_dft(pointer, riArray.Pointer, iiArray.Pointer, roArray.Pointer, ioArray.Pointer);
+        }
+
+        public void ExecuteDftR2c(FftwArray inArray, FftwArray outArray)
+        {
+            ValidateNewArrayExecFn(NewArrayExecFn.DftR2c);
+            ValidateArray(inArray, constraints.length0, nameof(inArray));
+            ValidateArray(outArray, constraints.length1, nameof(outArray));
+            if (constraints.inPlace)
+                ValidateIsInPlace(inArray, outArray, nameof(inArray), nameof(outArray));
+            ValidateAlignment(inArray, outArray);
+            fftw_execute_dft_r2c(pointer, inArray.Pointer, outArray.Pointer);
+        }
+
+        public void ExecuteSplitDftR2c(FftwArray inArray, FftwArray roArray, FftwArray ioArray)
+        {
+            ValidateNewArrayExecFn(NewArrayExecFn.SplitDftR2c);
+            ValidateArray(inArray, constraints.length0, nameof(inArray));
+            ValidateArray(roArray, constraints.length1, nameof(roArray));
+            ValidateArray(ioArray, constraints.length2, nameof(ioArray));
+            if (constraints.inPlace)
+                ValidateIsInPlace(inArray, roArray, nameof(inArray), nameof(roArray));
+            ValidateAlignment(inArray, roArray, ioArray);
+            fftw_execute_split_dft_r2c(pointer, inArray.Pointer, roArray.Pointer, ioArray.Pointer);
+        }
+
+        public void ExecuteDftC2r(FftwArray inArray, FftwArray outArray)
+        {
+            ValidateNewArrayExecFn(NewArrayExecFn.DftC2r);
+            ValidateArray(inArray, constraints.length0, nameof(inArray));
+            ValidateArray(outArray, constraints.length1, nameof(outArray));
+            if (constraints.inPlace)
+                ValidateIsInPlace(inArray, outArray, nameof(inArray), nameof(outArray));
+            ValidateAlignment(inArray, outArray);
+            fftw_execute_dft_c2r(pointer, inArray.Pointer, outArray.Pointer);
+        }
+
+        public void ExecuteSplitDftC2r(FftwArray riArray, FftwArray iiArray, FftwArray outArray)
+        {
+            ValidateNewArrayExecFn(NewArrayExecFn.SplitDftC2r);
+            ValidateArray(riArray, constraints.length0, nameof(riArray));
+            ValidateArray(iiArray, constraints.length1, nameof(iiArray));
+            ValidateArray(outArray, constraints.length2, nameof(outArray));
+            if (constraints.inPlace)
+                ValidateIsInPlace(riArray, outArray, nameof(riArray), nameof(outArray));
+            ValidateAlignment(riArray, iiArray, outArray);
+            fftw_execute_split_dft_c2r(pointer, riArray.Pointer, iiArray.Pointer, outArray.Pointer);
+        }
+
+        public void ExecuteR2r(FftwArray inArray, FftwArray outArray)
+        {
+            ValidateNewArrayExecFn(NewArrayExecFn.R2r);
+            ValidateArray(inArray, constraints.length0, nameof(inArray));
+            ValidateArray(outArray, constraints.length1, nameof(outArray));
+            if (constraints.inPlace)
+                ValidateIsInPlace(inArray, outArray, nameof(inArray), nameof(outArray));
+            ValidateAlignment(inArray, outArray);
+            fftw_execute_r2r(pointer, inArray.Pointer, outArray.Pointer);
+        }
 
         #endregion
 
