@@ -55,9 +55,24 @@ namespace Fftw.Net
         private NewArrayExecFn newArrayExecFn;
 
         /// <summary>
-        /// The lengths of the arrays used to create the plan, used in verifying arrays for new-array execute.
+        /// Required length of the first array
         /// </summary>
-        private long[] arrayLengths;
+        private long length0;
+
+        /// <summary>
+        /// Required length of the second array, if applicable
+        /// </summary>
+        private long length1;
+
+        /// <summary>
+        /// Required length of the third array, if applicable
+        /// </summary>
+        private long length2;
+
+        /// <summary>
+        /// Required length of the fourth array, if applicable
+        /// </summary>
+        private long length3;
 
         #endregion
 
@@ -84,18 +99,19 @@ namespace Fftw.Net
                 mustAlign = mustAlign && array.FftwAllocated;
                 array.IncrementPlans();
             }
-            // this is imperfect - if the arrays are user supplied they may be larger than required
-            // the user may easily work around this, and it substantially simplifies the code in this class
-            arrayLengths = arrays.Select(x => x.LongLength).ToArray();
             // bit of a hack - if a planning method calls another planning method, it is because the first is a wrapper
             // these wrappers allocate the arrays for the user, and so these arrays are owned by the plan
             var trace = new StackTrace();
             if (trace.FrameCount > 2 && trace.GetFrame(2).GetMethod().DeclaringType == typeof(FftwPlan))
-            {
                 owned = true;
-                foreach (var array in arrays)
-                    array.IncrementPlans();
-            }
+            // lengths of user supplied arrays may be longer than required, so this is suboptimal
+            length0 = arrays[0].Length;
+            if (arrays.Length > 1)
+                length1 = arrays[1].Length;
+            if (arrays.Length > 2)
+                length2 = arrays[2].Length;
+            if (arrays.Length > 3)
+                length3 = arrays[3].Length;
         }
 
         #endregion
