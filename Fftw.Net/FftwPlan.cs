@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
 using System.Threading;
 
 using static Fftw.Net.FftwBindings;
@@ -13,9 +15,22 @@ namespace Fftw.Net
     /// FftwPlan is a base class for encapsulations of FFTW plan objects and contains the static factory methods for
     /// creating instances of plan objects.
     /// </summary>
-    public abstract class FftwPlan : IDisposable
+    public class FftwPlan : IDisposable
     {
-        protected IntPtr Pointer { get; }
+        private enum NewArrayExecFn
+        {
+            Dft,
+            SplitDft,
+            DftR2c,
+            SplitDftR2c,
+            DftC2r,
+            SplitDftC2r,
+            R2r
+        }
+
+        #region Private Fields
+
+        private IntPtr pointer { get; }
 
         private bool mustAlign;
 
@@ -25,39 +40,65 @@ namespace Fftw.Net
         private bool disposed = false;
 
         /// <summary>
-        /// The list of FftwArray objects which were created by the planner factory method and require disposal
+        /// The FftwArray objects used by the plan
         /// </summary>
-        private ICollection<FftwArray> owned = new List<FftwArray>();
+        private FftwArray[] arrays;
+
+        /// <summary>
+        /// Whether <see cref="arrays"/> are owned by the plan (constructed by the plan factory method)
+        /// </summary>
+        private bool owned;
+        
+        /// <summary>
+        /// Indicates the appropriate new-array execute function.
+        /// </summary>
+        private NewArrayExecFn newArrayExecFn;
+
+        /// <summary>
+        /// The lengths of the arrays used to create the plan, used in verifying arrays for new-array execute.
+        /// </summary>
+        private long[] arrayLengths;
+
+        #endregion
+
+        #region Private Constructor
 
         /// <summary>
         /// Initializes an instance of <see cref="FftwPlan"/>.
         /// </summary>
         /// <param name="flags">The flags passed to the planner routine.</param>
         /// <param name="pointer">The pointer to the plan returned by the planner routine</param>
+        /// <param name="newArrayExecFn">The appropriate new-array execute function for this plan</param>
         /// <param name="arrays">The arrays used by the planner routine</param>
-        private protected FftwPlan(FftwFlags flags, IntPtr pointer, params FftwArray[] arrays)
+        private FftwPlan(FftwFlags flags, IntPtr pointer, NewArrayExecFn newArrayExecFn, params FftwArray[] arrays)
         {
             if (pointer == IntPtr.Zero)
                 throw new ArgumentException("A NULL plan was returned by the FFTW planner method. " +
                     "This is probably due to a bad flag. Please check the FFTW documentation for details.");
-            Pointer = pointer;
+            this.pointer = pointer;
+            this.newArrayExecFn = newArrayExecFn;
+            this.arrays = arrays;
             mustAlign = (flags & FftwFlags.FFTW_UNALIGNED) == 0;
             foreach (var array in arrays)
-                mustAlign = mustAlign && array.FftwAllocated;
-        }
-
-        /// <summary>
-        /// Assumes ownership for the given arrays, ensuring their disposal upon disposal of the plan.
-        /// </summary>
-        /// <param name="arrays">The arrays which are owned by the plan</param>
-        private protected void AssumeOwnership(params FftwArray[] arrays)
-        {
-            foreach (var array in arrays)
             {
-                owned.Add(array);
+                mustAlign = mustAlign && array.FftwAllocated;
                 array.IncrementPlans();
             }
+            // this is imperfect - if the arrays are user supplied they may be larger than required
+            // the user may easily work around this, and it substantially simplifies the code in this class
+            arrayLengths = arrays.Select(x => x.LongLength).ToArray();
+            // bit of a hack - if a planning method calls another planning method, it is because the first is a wrapper
+            // these wrappers allocate the arrays for the user, and so these arrays are owned by the plan
+            var trace = new StackTrace();
+            if (trace.FrameCount > 2 && trace.GetFrame(2).GetMethod().DeclaringType == typeof(FftwPlan))
+            {
+                owned = true;
+                foreach (var array in arrays)
+                    array.IncrementPlans();
+            }
         }
+
+        #endregion
 
         #region Helper Functions
 
@@ -215,17 +256,18 @@ namespace Fftw.Net
         /// <param name="outArray">The complex data output array</param>
         /// <param name="sign">The direction of the transform</param>
         /// <param name="flags">One or more planner flags, combined by bitwise OR</param>
-        public static FftwPlanDft Dft1D(int n0, FftwArray inArray, FftwArray outArray,
+        public static FftwPlan Dft1D(int n0, FftwArray inArray, FftwArray outArray,
             FftwSign sign = FftwSign.FFTW_FORWARD, FftwFlags flags = FftwFlags.FFTW_MEASURE)
         {
             int length = DftLength(n0);
             ValidateSign(sign);
             ValidateArray(inArray, length, nameof(inArray));
             ValidateArray(outArray, length, nameof(outArray));
-            return new FftwPlanDft(flags,
+            return new FftwPlan(flags,
                 fftw_plan_dft_1d(n0,
                     inArray.Pointer, outArray.Pointer,
                     (int_t)sign, (uint_t)flags),
+                NewArrayExecFn.Dft,
                 inArray, outArray);
         }
 
@@ -241,7 +283,7 @@ namespace Fftw.Net
         /// <param name="outArray">The complex data output array</param>
         /// <param name="sign">The direction of the transform</param>
         /// <param name="flags">One or more planner flags, combined by bitwise OR</param>
-        public static FftwPlanDft Dft1D(int n0, out FftwArray inArray, out FftwArray outArray,
+        public static FftwPlan Dft1D(int n0, out FftwArray inArray, out FftwArray outArray,
             FftwSign sign = FftwSign.FFTW_FORWARD, FftwFlags flags = FftwFlags.FFTW_MEASURE)
         {
             int length = DftLength(n0);
@@ -261,7 +303,7 @@ namespace Fftw.Net
         /// <param name="ioArray">The complex data input / output array</param>
         /// <param name="sign">The direction of the transform</param>
         /// <param name="flags">One or more planner flags, combined by bitwise OR</param>
-        public static FftwPlanDft Dft1D(int n0, out FftwArray ioArray,
+        public static FftwPlan Dft1D(int n0, out FftwArray ioArray,
             FftwSign sign = FftwSign.FFTW_FORWARD, FftwFlags flags = FftwFlags.FFTW_MEASURE)
         {
             ioArray = new FftwArray(DftLength(n0));
@@ -282,17 +324,18 @@ namespace Fftw.Net
         /// <param name="outArray">The complex data output array</param>
         /// <param name="sign">The direction of the transform</param>
         /// <param name="flags">One or more planner flags, combined by bitwise OR</param>
-        public static FftwPlanDft Dft2D(int n0, int n1, FftwArray inArray, FftwArray outArray,
+        public static FftwPlan Dft2D(int n0, int n1, FftwArray inArray, FftwArray outArray,
             FftwSign sign = FftwSign.FFTW_FORWARD, FftwFlags flags = FftwFlags.FFTW_MEASURE)
         {
             int length = DftLength(n0, n1);
             ValidateSign(sign);
             ValidateArray(inArray, length, nameof(inArray));
             ValidateArray(outArray, length, nameof(outArray));
-            return new FftwPlanDft(flags,
+            return new FftwPlan(flags,
                 fftw_plan_dft_2d(n0, n1,
                     inArray.Pointer, outArray.Pointer,
                     (int_t)sign, (uint_t)flags),
+                NewArrayExecFn.Dft,
                 inArray, outArray);
         }
 
@@ -309,7 +352,7 @@ namespace Fftw.Net
         /// <param name="outArray">The complex data output array</param>
         /// <param name="sign">The direction of the transform</param>
         /// <param name="flags">One or more planner flags, combined by bitwise OR</param>
-        public static FftwPlanDft Dft2D(int n0, int n1, out FftwArray inArray, out FftwArray outArray,
+        public static FftwPlan Dft2D(int n0, int n1, out FftwArray inArray, out FftwArray outArray,
             FftwSign sign = FftwSign.FFTW_FORWARD, FftwFlags flags = FftwFlags.FFTW_MEASURE)
         {
             int length = DftLength(n0, n1);
@@ -331,7 +374,7 @@ namespace Fftw.Net
         /// <param name="outArray">The complex data output array</param>
         /// <param name="sign">The direction of the transform</param>
         /// <param name="flags">One or more planner flags, combined by bitwise OR</param>
-        public static FftwPlanDft Dft2D(int n0, int n1, out FftwArray ioArray,
+        public static FftwPlan Dft2D(int n0, int n1, out FftwArray ioArray,
             FftwSign sign = FftwSign.FFTW_FORWARD, FftwFlags flags = FftwFlags.FFTW_MEASURE)
         {
             ioArray = new FftwArray(DftLength(n0, n1));
@@ -353,17 +396,18 @@ namespace Fftw.Net
         /// <param name="outArray">The complex data output array</param>
         /// <param name="sign">The direction of the transform</param>
         /// <param name="flags">One or more planner flags, combined by bitwise OR</param>
-        public static FftwPlanDft Dft3D(int n0, int n1, int n2, FftwArray inArray, FftwArray outArray,
+        public static FftwPlan Dft3D(int n0, int n1, int n2, FftwArray inArray, FftwArray outArray,
             FftwSign sign = FftwSign.FFTW_FORWARD, FftwFlags flags = FftwFlags.FFTW_MEASURE)
         {
             int length = DftLength(n0, n1, n2);
             ValidateSign(sign);
             ValidateArray(inArray, length, nameof(inArray));
             ValidateArray(outArray, length, nameof(outArray));
-            return new FftwPlanDft(flags,
+            return new FftwPlan(flags,
                 fftw_plan_dft_3d(n0, n1, n2,
                     inArray.Pointer, outArray.Pointer,
                     (int_t)sign, (uint_t)flags),
+                NewArrayExecFn.Dft,
                 inArray, outArray);
         }
 
@@ -381,7 +425,7 @@ namespace Fftw.Net
         /// <param name="outArray">The complex data output array</param>
         /// <param name="sign">The direction of the transform</param>
         /// <param name="flags">One or more planner flags, combined by bitwise OR</param>
-        public static FftwPlanDft Dft3D(int n0, int n1, int n2, out FftwArray inArray, out FftwArray outArray,
+        public static FftwPlan Dft3D(int n0, int n1, int n2, out FftwArray inArray, out FftwArray outArray,
             FftwSign sign = FftwSign.FFTW_FORWARD, FftwFlags flags = FftwFlags.FFTW_MEASURE)
         {
             int length = DftLength(n0, n1, n2);
@@ -404,7 +448,7 @@ namespace Fftw.Net
         /// <param name="outArray">The complex data output array</param>
         /// <param name="sign">The direction of the transform</param>
         /// <param name="flags">One or more planner flags, combined by bitwise OR</param>
-        public static FftwPlanDft Dft3D(int n0, int n1, int n2, out FftwArray ioArray,
+        public static FftwPlan Dft3D(int n0, int n1, int n2, out FftwArray ioArray,
             FftwSign sign = FftwSign.FFTW_FORWARD, FftwFlags flags = FftwFlags.FFTW_MEASURE)
         {
             ioArray = new FftwArray(DftLength(n0, n1, n2));
@@ -424,17 +468,18 @@ namespace Fftw.Net
         /// <param name="outArray">The complex data output array</param>
         /// <param name="sign">The direction of the transform</param>
         /// <param name="flags">One or more planner flags, combined by bitwise OR</param>
-        public static FftwPlanDft Dft(int[] n, FftwArray inArray, FftwArray outArray,
+        public static FftwPlan Dft(int[] n, FftwArray inArray, FftwArray outArray,
             FftwSign sign = FftwSign.FFTW_FORWARD, FftwFlags flags = FftwFlags.FFTW_MEASURE)
         {
             int length = DftLength(n);
             ValidateSign(sign);
             ValidateArray(inArray, length, nameof(inArray));
             ValidateArray(outArray, length, nameof(outArray));
-            return new FftwPlanDft(flags,
+            return new FftwPlan(flags,
                 fftw_plan_dft(n.Length, n,
                     inArray.Pointer, outArray.Pointer,
                     (int_t)sign, (uint_t)flags),
+                NewArrayExecFn.Dft,
                 inArray, outArray);
         }
 
@@ -450,7 +495,7 @@ namespace Fftw.Net
         /// <param name="outArray">The complex data output array</param>
         /// <param name="sign">The direction of the transform</param>
         /// <param name="flags">One or more planner flags, combined by bitwise OR</param>
-        public static FftwPlanDft Dft(int[] n, out FftwArray inArray, out FftwArray outArray,
+        public static FftwPlan Dft(int[] n, out FftwArray inArray, out FftwArray outArray,
             FftwSign sign = FftwSign.FFTW_FORWARD, FftwFlags flags = FftwFlags.FFTW_MEASURE)
         {
             int length = DftLength(n);
@@ -471,7 +516,7 @@ namespace Fftw.Net
         /// <param name="outArray">The complex data output array</param>
         /// <param name="sign">The direction of the transform</param>
         /// <param name="flags">One or more planner flags, combined by bitwise OR</param>
-        public static FftwPlanDft Dft(int[] n, out FftwArray ioArray,
+        public static FftwPlan Dft(int[] n, out FftwArray ioArray,
             FftwSign sign = FftwSign.FFTW_FORWARD, FftwFlags flags = FftwFlags.FFTW_MEASURE)
         {
             ioArray = new FftwArray(DftLength(n));
@@ -493,6 +538,7 @@ namespace Fftw.Net
                 fftw_plan_dft_r2c_1d(n0,
                     inArray.Pointer, outArray.Pointer,
                     (uint_t)flags),
+                NewArrayExecFn.DftR2c,
                 inArray, outArray);
         }
 
@@ -522,6 +568,7 @@ namespace Fftw.Net
                 fftw_plan_dft_r2c_2d(n0, n1,
                     inArray.Pointer, outArray.Pointer,
                     (uint_t)flags),
+                NewArrayExecFn.DftR2c,
                 inArray, outArray);
         }
 
@@ -551,6 +598,7 @@ namespace Fftw.Net
                 fftw_plan_dft_r2c_3d(n0, n1, n2,
                     inArray.Pointer, outArray.Pointer,
                     (uint_t)flags),
+                NewArrayExecFn.DftR2c,
                 inArray, outArray);
         }
 
@@ -580,6 +628,7 @@ namespace Fftw.Net
                 fftw_plan_dft_r2c(n.Length, n,
                     inArray.Pointer, outArray.Pointer,
                     (uint_t)flags),
+                NewArrayExecFn.DftR2c,
                 inArray, outArray);
         }
 
@@ -613,6 +662,7 @@ namespace Fftw.Net
                 fftw_plan_dft_c2r_1d(n0,
                     inArray.Pointer, outArray.Pointer,
                     (uint_t)flags),
+                NewArrayExecFn.SplitDftC2r,
                 inArray, outArray);
         }
 
@@ -642,6 +692,7 @@ namespace Fftw.Net
                 fftw_plan_dft_c2r_2d(n0, n1,
                     inArray.Pointer, outArray.Pointer,
                     (uint_t)flags),
+                NewArrayExecFn.DftC2r,
                 inArray, outArray);
         }
 
@@ -671,6 +722,7 @@ namespace Fftw.Net
                 fftw_plan_dft_c2r_3d(n0, n1, n2,
                     inArray.Pointer, outArray.Pointer,
                     (uint_t)flags),
+                NewArrayExecFn.DftC2r,
                 inArray, outArray);
         }
 
@@ -700,6 +752,7 @@ namespace Fftw.Net
                 fftw_plan_dft_c2r(n.Length, n,
                     inArray.Pointer, outArray.Pointer,
                     (uint_t)flags),
+                NewArrayExecFn.DftC2r,
                 inArray, outArray);
         }
 
@@ -732,6 +785,7 @@ namespace Fftw.Net
                 fftw_plan_r2r_1d(n0,
                     inArray.Pointer, outArray.Pointer,
                     kind0, (uint_t)flags),
+                NewArrayExecFn.R2r,
                 inArray, outArray);
         }
 
@@ -761,6 +815,7 @@ namespace Fftw.Net
                 fftw_plan_r2r_2d(n0, n1,
                     inArray.Pointer, outArray.Pointer,
                     kind0, kind1, (uint_t)flags),
+                NewArrayExecFn.R2r,
                 inArray, outArray);
         }
 
@@ -790,6 +845,7 @@ namespace Fftw.Net
                 fftw_plan_r2r_3d(n0, n1, n2,
                     inArray.Pointer, outArray.Pointer,
                     kind0, kind1, kind2, (uint_t)flags),
+                NewArrayExecFn.R2r,
                 inArray, outArray);
         }
 
@@ -819,6 +875,7 @@ namespace Fftw.Net
                 fftw_plan_r2r(n.Length, n,
                     inArray.Pointer, outArray.Pointer,
                     kind, (uint_t)flags),
+                NewArrayExecFn.R2r,
                 inArray, outArray);
         }
 
@@ -861,10 +918,29 @@ namespace Fftw.Net
 
         #endregion
 
+        #region Execute
+
+        /// <summary>
+        /// Executes the plan on the arrays it was created with. See FFTW documentation for details on fftw_execute.
+        /// </summary>
         public void Execute()
         {
-            fftw_execute(Pointer);
+            fftw_execute(pointer);
         }
+
+        /*
+        /// <summary>
+        /// Executes the plan on new arrays supplied. See FFTW documentation for details on fftw_execute_dft.
+        /// </summary>
+        public void ExecuteDft(FftwArray inArray, FftwArray outArray)
+        {
+            fftw_execute_dft(pointer, inArray.Pointer, outArray.Pointer);
+        }
+        */
+
+        #endregion
+
+        #region IDisposable Implementation
 
         /// <summary>
         /// Implementation of Dispose pattern.
@@ -876,12 +952,15 @@ namespace Fftw.Net
             if (disposed) return;
             if (disposing)
             {
-                foreach (var array in owned)
+                foreach (var array in arrays)
                 {
                     array.DecrementPlans();
+                    if (owned)
+                        array.Dispose();
                 }
+                arrays = null;
             }
-            fftw_destroy_plan(Pointer);
+            fftw_destroy_plan(pointer);
             GC.SuppressFinalize(this);
             disposed = true;
         }
@@ -893,19 +972,7 @@ namespace Fftw.Net
         {
             Dispose(false);
         }
-    }
 
-    public sealed class FftwPlanDft : FftwPlan
-    {
-        internal FftwPlanDft(FftwFlags flags, IntPtr pointer, FftwArray inArray, FftwArray outArray) :
-            base(flags, pointer, inArray, outArray)
-        {
-
-        }
-
-        public void Execute(FftwArray inArray, FftwArray outArray)
-        {
-            //fftw_execute_dft(pointer);
-        }
+        #endregion
     }
 }

@@ -9,7 +9,7 @@ namespace Fftw.Net.TestApp
         {
             Console.WriteLine("FFTW Test:");
             var foo = FftwPlan.Dft1D(4, out FftwArray ioArray);
-            var bar = ioArray.Span;
+            var bar = ioArray.DoubleSpan;
             bar[0] =  1;
             bar[1] =  0;
             bar[2] =  0;
@@ -23,9 +23,9 @@ namespace Fftw.Net.TestApp
         }
         static void PrintArry(FftwArray arry)
         {
-            var foo = arry.Span;
-            for (int n = 0; n < arry.Length; n += 2)
-                Console.WriteLine($"<{foo[n]}, {foo[n+1]}>");
+            var foo = arry.ComplexSpan;
+            foreach (var value in foo)
+                Console.WriteLine($"<{value.Real}, {value.Imaginary}>");
         }
     }
 }

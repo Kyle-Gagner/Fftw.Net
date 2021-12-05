@@ -1,5 +1,6 @@
 using System;
 using System.Runtime.InteropServices;
+using System.Numerics;
 using System.Threading;
 
 using static Fftw.Net.FftwBindings;
@@ -76,6 +77,64 @@ namespace Fftw.Net
         /// property may be used to determine whether the plan's arrays are expected to be aligned.
         /// </summary>
         internal bool FftwAllocated => owning;
+
+        /// <summary>
+        /// Gets a <see cref="Span<T>"/> for the underlying memory backing the buffer as double values
+        /// </summary>
+        /// <remarks>
+        /// Due to its safety and efficiency, <see cref="Span<T>"/> is the preferred means of accessing the memory.
+        /// Spans are limited by the size of a 32-bit integer. To access the span on very large arrays,
+        /// use <see cref="Slice(long,long)"/> to create a smaller array backed by the same memory, then use the span on
+        /// that smaller array.
+        /// </remarks>
+        /// <exception cref="OverflowException">The length exceeds <see cref="Int32.MaxValue"/>.</exception>
+        public Span<double> DoubleSpan
+        {
+            get
+            {
+                unsafe
+                {
+                    try
+                    {
+                        return new Span<double>(Pointer.ToPointer(), Length);
+                    }
+                    catch (OverflowException ex)
+                    {
+                        throw new OverflowException("The length of the array exceeds Int32.MaxValue." +
+                            "Try slicing the array to a reasonable size before getting the Span on the slice.", ex);
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Gets a <see cref="Span<T>"/> for the underlying memory backing the buffer as complex values
+        /// </summary>
+        /// <remarks>
+        /// Due to its safety and efficiency, <see cref="Span<T>"/> is the preferred means of accessing the memory.
+        /// Spans are limited by the size of a 32-bit integer. To access the span on very large arrays,
+        /// use <see cref="Slice(long,long)"/> to create a smaller array backed by the same memory, then use the span on
+        /// that smaller array.
+        /// </remarks>
+        /// <exception cref="OverflowException">The length exceeds <see cref="Int32.MaxValue"/>.</exception>
+        public Span<Complex> ComplexSpan
+        {
+            get
+            {
+                unsafe
+                {
+                    try
+                    {
+                        return new Span<Complex>(Pointer.ToPointer(), Length / 2);
+                    }
+                    catch (OverflowException ex)
+                    {
+                        throw new OverflowException("The length of the array exceeds Int32.MaxValue." +
+                            "Try slicing the array to a reasonable size before getting the Span on the slice.", ex);
+                    }
+                }
+            }
+        }
 
         /// <summary>
         /// Initializes an instance of <see cref="FftwArray"/> backed by memory allocated on the unmanaged heap using
@@ -303,6 +362,7 @@ namespace Fftw.Net
                 GC.SuppressFinalize(this);
                 if (root != null)
                     root.DecrementSlices();
+                root = null;
             }
             if (owning)
                 fftw_free(Pointer);
