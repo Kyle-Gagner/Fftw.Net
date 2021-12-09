@@ -20,6 +20,8 @@ namespace Fftw.Net
     /// </remarks>
     public class FftwArray: IDisposable
     {
+        private const int ELEMENT_SIZE = sizeof(double);
+
         /// <summary>
         /// The number of yet to be disposed slices of the array, applicable for roots of slices
         /// </summary>
@@ -37,7 +39,7 @@ namespace Fftw.Net
 
         /// <summary>
         /// The length of the array
-        /// <summary>
+        /// <summary>nt
         private long length;
 
         /// <summary>
@@ -140,6 +142,12 @@ namespace Fftw.Net
         /// Initializes an instance of <see cref="FftwArray"/> backed by memory allocated on the unmanaged heap using
         /// fftw_malloc for the lifetime of the array until it is disposed at which point it is freed with fftw_free
         /// <summary/>
+        /// <remarks>
+        /// Although the allocated memory is unmanaged, this constructor adds memory pressure to the garbage collector
+        /// to account for this. If it is acceptable to memory performance and convenience or necessity dicatates,
+        /// it is permissible to neglect disposal of objects initialized by this method. The garbage collector will
+        /// finalize the object, freeing the unmanaged memory and removing the added memory pressure.
+        /// </remarks>
         /// <param name="length">The number of elements in the array</param>
         /// <exception cref="ArgumentOutOfRangeException">Specified length is less than 1.</exception>
         /// <exception cref="OverflowException">
@@ -152,11 +160,12 @@ namespace Fftw.Net
             if (length < 1)
                 throw new ArgumentException("Arrays must contain at least one element.", nameof(length));
             this.length = length;
+            long size = ELEMENT_SIZE * length;
             try
             {
                 checked
                 {
-                    Pointer = fftw_malloc((UIntPtr)(sizeof(double) * length));
+                    Pointer = fftw_malloc((UIntPtr)size);
                 }
             }
             catch (OverflowException ex)
@@ -165,21 +174,9 @@ namespace Fftw.Net
             }
             if (Pointer == IntPtr.Zero)
                 throw new OutOfMemoryException("The system could not allocate the requested amount of memory.");
+            GC.AddMemoryPressure(size);
             owning = true;
         }
-
-        /// <summary>
-        /// Initializes an instance of <see cref="FftwArray"/> backed by memory allocated on the unmanaged heap using
-        /// fftw_malloc for the lifetime of the array until it is disposed at which point it is freed with fftw_free
-        /// <summary/>
-        /// <param name="length">The number of elements in the array</param>
-        /// <exception cref="ArgumentOutOfRangeException">Specified length is less than 1.</exception>
-        /// <exception cref="OverflowException">
-        /// The calculation of the physical allocation size overflowed or the result could not be cast to
-        /// <see cref="UIntPtr"/>.
-        /// </exception>
-        /// <exception cref="OutOfMemoryException">The physical allocation size could not be satisfied.</exception>
-        public FftwArray(int length) : this((long)length) { }
 
         /// <summary>
         /// Initializes an instance of <see cref="FftwArray"/> backed by an array object which is pinned for the
@@ -188,7 +185,8 @@ namespace Fftw.Net
         /// <summary>
         /// <remarks>
         /// Pinning large objects can severely affect the efficiency of the runtime's garbage collector. Objects
-        /// constructed by this method should be disposed as soon as possible.
+        /// constructed by this method should be disposed as soon as possible. Neglecting disposal and leaving the job
+        /// to the garbage collector is strongly advised against.
         /// </remarks>
         public FftwArray(double[] array)
         {
@@ -365,7 +363,10 @@ namespace Fftw.Net
                 root = null;
             }
             if (owning)
+            {
                 fftw_free(Pointer);
+                GC.RemoveMemoryPressure(ELEMENT_SIZE * length);
+            }
             else if (handle.HasValue)
                 handle.Value.Free();
             disposed = true;
