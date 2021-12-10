@@ -61,7 +61,7 @@ namespace Fftw.Net
         /// A pointer to the contents of the array, either supplied externally, allocated on the unmanaged heap, or
         /// from a pinned array
         /// </summary>
-        public IntPtr Pointer { get; }
+        public IntPtr Pointer { get; } = IntPtr.Zero;
 
         /// <summary>
         /// Gets the length of the array.
@@ -127,7 +127,7 @@ namespace Fftw.Net
                 {
                     try
                     {
-                        return new Span<Complex>(Pointer.ToPointer(), Length / 2);
+                        return new Span<Complex>(Pointer.ToPointer(), checked((int)(LongLength / 2)));
                     }
                     catch (OverflowException ex)
                     {
@@ -157,25 +157,25 @@ namespace Fftw.Net
         /// <exception cref="OutOfMemoryException">The physical allocation size could not be satisfied.</exception>
         public FftwArray(long length)
         {
-            if (length < 1)
-                throw new ArgumentException("Arrays must contain at least one element.", nameof(length));
+            if (length < 0)
+                throw new ArgumentOutOfRangeException(nameof(length));
             this.length = length;
-            long size = ELEMENT_SIZE * length;
-            try
+            if (length != 0)
             {
-                checked
+                try
                 {
-                    Pointer = fftw_malloc((UIntPtr)size);
+                    long size = ELEMENT_SIZE * length;
+                    Pointer = fftw_malloc(checked((UIntPtr)size));
+                    GC.AddMemoryPressure(size);
+                    owning = true;
+                }
+                catch (OverflowException ex)
+                {
+                    throw new OverflowException("The physical size of the allocation is unreasonably large.", ex);
                 }
             }
-            catch (OverflowException ex)
-            {
-                throw new OverflowException("The physical size of the allocation is unreasonably large.", ex);
-            }
-            if (Pointer == IntPtr.Zero)
+            if (Pointer == IntPtr.Zero && length != 0)
                 throw new OutOfMemoryException("The system could not allocate the requested amount of memory.");
-            GC.AddMemoryPressure(size);
-            owning = true;
         }
 
         /// <summary>
@@ -196,17 +196,48 @@ namespace Fftw.Net
         }
 
         /// <summary>
+        /// Initializes an instance of <see cref="FftwArray"/> backed by an array object which is pinned for the
+        /// lifetime of the array until it is disposed. Modifying data in the FftwArray alters the data in the
+        /// underlying Array object.
+        /// <summary>
+        /// <remarks>
+        /// Pinning large objects can severely affect the efficiency of the runtime's garbage collector. Objects
+        /// constructed by this method should be disposed as soon as possible. Neglecting disposal and leaving the job
+        /// to the garbage collector is strongly advised against.
+        /// </remarks>
+        public FftwArray(double[] array, long offset, long count)
+        {
+            if (count < 0 || count > array.LongLength)
+                throw new ArgumentOutOfRangeException(nameof(count));
+            if (offset < 0 || offset + count > array.LongLength)
+                throw new ArgumentOutOfRangeException(nameof(offset));
+            length = count;
+            handle = GCHandle.Alloc(array, GCHandleType.Pinned);
+            Pointer = (IntPtr)((long)handle.Value.AddrOfPinnedObject() + ELEMENT_SIZE * offset);
+        }
+
+        /// <summary>
+        /// Initializes an instance of <see cref="FftwArray"/> backed by an array object which is pinned for the
+        /// lifetime of the array until it is disposed. Modifying data in the FftwArray alters the data in the
+        /// underlying Array object.
+        /// <summary>
+        /// <remarks>
+        /// Pinning large objects can severely affect the efficiency of the runtime's garbage collector. Objects
+        /// constructed by this method should be disposed as soon as possible. Neglecting disposal and leaving the job
+        /// to the garbage collector is strongly advised against.
+        /// </remarks>
+        public FftwArray(ArraySegment<double> arraySegment) :
+            this(arraySegment.Array, arraySegment.Offset, arraySegment.Count) { }
+
+        /// <summary>
         /// Initializes an instance of <see cref="FftwArray"/> backed by arbitrary memory. No action is taken upon
         /// disposal.
         /// </summary>
-        /// <remarks>
-        /// Throws an <see cref="ArgumentOutOfRangeException"/> for length &lt; 1.
-        /// </remarks>
         /// <param name="pointer">A pointer to the memory used by the array</param>
         /// <param name="length">The number of elements in the array</param>
         public unsafe FftwArray(IntPtr pointer, long length)
         {
-            if (length < 1)
+            if (length < 0)
                 throw new ArgumentOutOfRangeException(nameof(length));
             this.length = length;
             Pointer = pointer;
